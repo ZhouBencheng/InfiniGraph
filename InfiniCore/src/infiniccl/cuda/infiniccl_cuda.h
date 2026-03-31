@@ -1,6 +1,7 @@
 #ifndef INFINICCL_CUDA_H_
 #define INFINICCL_CUDA_H_
 
+#include "../../infinirt/cuda/infinirt_cuda.cuh"
 #include "../infiniccl_impl.h"
 
 // Windows does not support CUDA

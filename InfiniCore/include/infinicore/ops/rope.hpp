@@ -8,7 +8,14 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(RoPE, Tensor, const Tensor &, const Tensor &, const Tensor &, const Tensor &, infinicore::nn::RoPE::Algo);
+INFINICORE_GRAPH_OP_CLASS(RoPE,
+                          infinicore::analyzer::OpType::ROPE,
+                          Tensor,
+                          const Tensor &,
+                          const Tensor &,
+                          const Tensor &,
+                          const Tensor &,
+                          infinicore::nn::RoPE::Algo);
 
 // Internal
 void rope_(Tensor x_out,

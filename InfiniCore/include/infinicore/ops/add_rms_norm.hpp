@@ -1,11 +1,19 @@
 #pragma once
 
 #include "../device.hpp"
+#include "../graph/graph.hpp"
 #include "common/op.hpp"
 #include <utility>
 
 namespace infinicore::op {
-INFINICORE_GRAPH_OP_CLASS(AddRMSNorm, Tensor, Tensor, const Tensor &, const Tensor &, const Tensor &, float);
+INFINICORE_GRAPH_OP_CLASS(AddRMSNorm,
+                          infinicore::analyzer::OpType::ADD_RMS_NORM,
+                          Tensor,
+                          Tensor,
+                          const Tensor &,
+                          const Tensor &,
+                          const Tensor &,
+                          float);
 
 // Fused Add and RMS Normalization
 // Returns: (normalized_result, add_result)

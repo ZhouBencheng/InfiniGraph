@@ -91,3 +91,17 @@ target("infinicore-test")
     add_files(os.projectdir().."/src/infinicore-test/**.cc")
     set_installdir(INFINI_ROOT)
 target_end()
+
+target("analyzer-test")
+    set_kind("binary")
+    set_default(false)
+    add_deps("infinicore_cpp_api")
+
+    set_languages("cxx17")
+    set_warnings("all", "error")
+
+    add_includedirs("include")
+    add_files(os.projectdir().."/src/analyzer-test/*.cc")
+
+    set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))
+target_end()

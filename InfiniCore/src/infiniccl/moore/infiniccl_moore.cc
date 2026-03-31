@@ -68,7 +68,7 @@ infiniStatus_t commInitAll(
     CHECK_MCCL(mcclCommInitAll(mccl_comms.data(), ndevice, (int const *)device_ids));
 
     for (int i = 0; i < ndevice; i++) {
-        comms[i] = new InfinicclComm{INFINI_DEVICE_MOORE, device_ids[i], (void *)(mccl_comms[i])};
+        comms[i] = new InfinicclComm{INFINI_DEVICE_MOORE, device_ids[i], ndevice, (void *)(mccl_comms[i])};
     }
 
     return INFINI_STATUS_SUCCESS;

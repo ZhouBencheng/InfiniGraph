@@ -7,7 +7,14 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(I8Gemm, Tensor, const Tensor &, const Tensor &, const Tensor &, const Tensor &, std::optional<Tensor>);
+INFINICORE_GRAPH_OP_CLASS(I8Gemm,
+                          infinicore::analyzer::OpType::SCALED_MM_I8,
+                          Tensor,
+                          const Tensor &,
+                          const Tensor &,
+                          const Tensor &,
+                          const Tensor &,
+                          std::optional<Tensor>);
 
 void scaled_mm_i8_(Tensor c, const Tensor &a_p, const Tensor &a_s, const Tensor &b_p, const Tensor &b_s, std::optional<Tensor> bias);
 } // namespace infinicore::op
