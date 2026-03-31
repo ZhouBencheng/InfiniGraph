@@ -22,7 +22,6 @@ namespace infinicore::op {
 
 INFINICORE_GRAPH_OP_CLASS(
     MhaKVCache,
-    infinicore::analyzer::OpType::MHA_KVCACHE,
     Tensor,           // out
     const Tensor &,   // q
     const Tensor &,   // k_cache

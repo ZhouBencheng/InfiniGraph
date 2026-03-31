@@ -6,11 +6,7 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(PerChannelQuantI8,
-                          infinicore::analyzer::OpType::PER_CHANNEL_QUANT_I8,
-                          const Tensor &,
-                          Tensor,
-                          Tensor);
+INFINICORE_GRAPH_OP_CLASS(PerChannelQuantI8, const Tensor &, Tensor, Tensor);
 
 void per_channel_quant_i8_(const Tensor &x, Tensor x_packed, Tensor x_scale);
 } // namespace infinicore::op

@@ -6,13 +6,7 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(KVCaching,
-                          infinicore::analyzer::OpType::KV_CACHING,
-                          Tensor,
-                          Tensor,
-                          const Tensor &,
-                          const Tensor &,
-                          const Tensor &);
+INFINICORE_GRAPH_OP_CLASS(KVCaching, Tensor, Tensor, const Tensor &, const Tensor &, const Tensor &);
 
 void kv_caching_(Tensor k_cache,
                  Tensor v_cache,

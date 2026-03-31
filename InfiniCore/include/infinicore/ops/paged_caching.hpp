@@ -6,13 +6,7 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(PagedCaching,
-                          infinicore::analyzer::OpType::PAGED_CACHING,
-                          Tensor,
-                          Tensor,
-                          const Tensor &,
-                          const Tensor &,
-                          const Tensor &);
+INFINICORE_GRAPH_OP_CLASS(PagedCaching, Tensor, Tensor, const Tensor &, const Tensor &, const Tensor &);
 
 void paged_caching_(Tensor k_cache, Tensor v_cache, const Tensor &k, const Tensor &v, const Tensor &slot_mapping);
 
