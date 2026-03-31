@@ -1,103 +1,103 @@
-# KernelDispatcher -- Device-Aware Kernel Dispatch Module
+# KernelDispatcher — 设备感知的 Kernel 调度模块
 
-## Background & Motivation
+## 背景与动机
 
-InfiniCore supports multiple GPU backends (NVIDIA, Iluvatar, MetaX, ALI, etc.), and the paged attention prefill operator has **8 kernel variants** (warp, warpcta, warpcta8, warpcta8pipe, warpcta8mma, warpcta8n128, warpcta16, ref) with significantly different performance characteristics across hardware.
+InfiniCore 支持多种 GPU 后端（NVIDIA、Iluvatar、MetaX、ALI 等），paged attention prefill 算子有 **8 种 kernel 变体**（warp、warpcta、warpcta8、warpcta8pipe、warpcta8mma、warpcta8n128、warpcta16、ref），在不同硬件上性能差异显著。
 
-**Problem**: Kernel variant selection was hardcoded in each `.cu` / `.maca` file's `default_prefill_kernel()` function. This couples dispatch logic with operator implementation, meaning:
-- Adding a new GPU requires modifying `.cu` files
-- Cannot dynamically adapt kernel choice based on runtime workload characteristics
-- No integration with the existing `MutualAwarenessAnalyzer` that already detects prefill/decode phases and outputs `OptimizationGoal`
+**问题**：kernel 变体选择原先硬编码在各 `.cu` / `.maca` 文件的 `default_prefill_kernel()` 函数中，调度逻辑与算子实现强耦合，导致：
+- 新增 GPU 硬件需要修改 `.cu` 文件
+- 无法根据运行时负载特征动态调整 kernel 选择
+- 未能利用已有的 `MutualAwarenessAnalyzer`（它已能检测 prefill/decode 阶段并输出 `OptimizationGoal`）
 
-**Benchmark evidence** (2026-03-31):
-- **NVIDIA A100**: `warpcta8pipe` wins 297/300 configurations for fp16/bf16 + page_block_size=256 + head_size=128
-- **Iluvatar BI-V150**: ~50/50 split between `warp` and `warpcta8pipe` depending on head_size and batch size:
-  - head_size <= 64: `warpcta8pipe` always wins
-  - head_size = 128, batch >= 4 or q_per_seq >= 64: `warp` wins
-  - head_size = 128, low batch: `warpcta8pipe` wins
+**Benchmark 数据驱动**（2026-03-31）：
+- **NVIDIA A100**：`warpcta8pipe` 在 fp16/bf16 + page_block_size=256 + head_size=128 下赢得 297/300 个配置
+- **Iluvatar BI-V150**：`warp` 和 `warpcta8pipe` 各约 50%，取决于 head_size 和 batch size：
+  - head_size <= 64：`warpcta8pipe` 始终更优
+  - head_size = 128, batch >= 4 或 q_per_seq >= 64：`warp` 更优
+  - head_size = 128, 小 batch：`warpcta8pipe` 更优
 
-These hardware-specific patterns motivate an independent dispatch module that can be extended per-device without touching operator code.
+不同硬件需要不同的调度策略，这促使我们将调度逻辑抽离为独立模块，新增硬件时无需改动算子代码。
 
-## Architecture
+## 架构
 
 ```
-MutualAwarenessAnalyzer                KernelDispatcher (this module)
-├── PhaseDetector                      ├── 3D lookup table:
+MutualAwarenessAnalyzer                KernelDispatcher（本模块）
+├── PhaseDetector                      ├── 三维查找表:
 ├── ResourceSensor                     │   (OpType, DeviceType, OptimizationGoal)
 ├── IntentGenerator                    │       -> KernelSelectFn
 │   -> OptimizationGoal                │
 └──────────────┬───────────────────────┘
                |
-        .cu / .maca files (consumers)
+        .cu / .maca 文件（消费者）
         default_prefill_kernel(info) {
             KernelDispatcher::instance()
                 .selectKernel(op, device, &info)
-                -> queries analyzer for current goal
-                -> looks up registered rule
-                -> returns kernel name (or nullptr for fallback)
+                -> 查询 analyzer 获取当前 goal
+                -> 查表获取注册的规则
+                -> 返回 kernel 名称（或 nullptr 走 fallback）
         }
 ```
 
-### Call Flow
+### 调用链
 
 ```
-DISPATCH_KERNEL macro
+DISPATCH_KERNEL 宏
   -> default_prefill_kernel(info)
        -> KernelDispatcher::selectKernel(op, device, &info)
-            1. Query MutualAwarenessAnalyzer for current OptimizationGoal
+            1. 查询 MutualAwarenessAnalyzer 获取当前 OptimizationGoal
                (LATENCY_FIRST / THROUGHPUT_FIRST / MEMORY_SAFE / STABILITY_FIRST)
-            2. Look up (OpType, DeviceType, Goal) in table
-            3. Call registered KernelSelectFn(info) -> kernel name
-       -> If nullptr: use original hardcoded heuristic as fallback
+            2. 用 (OpType, DeviceType, Goal) 查表
+            3. 调用注册的 KernelSelectFn(info) -> 返回 kernel 名称
+       -> 若返回 nullptr：使用原有硬编码启发式作为 fallback
 ```
 
-### Conditional Compilation
+### 条件编译
 
-- `ENABLE_MUTUAL_AWARENESS`: When OFF, the entire dispatch module is bypassed; `.cu` files use their original hardcoded heuristics unchanged.
-- `ENABLE_*_API` (NVIDIA/ILUVATAR/METAX/ALI): Determines which device's rules are registered at static init time.
+- `ENABLE_MUTUAL_AWARENESS`：关闭时整个调度模块被跳过，`.cu` 文件使用原有硬编码逻辑，行为完全不变。
+- `ENABLE_*_API`（NVIDIA/ILUVATAR/METAX/ALI）：决定静态初始化时注册哪个设备的规则。
 
-## File Structure
+## 文件结构
 
 ```
 include/infinicore/dispatch/
-├── kernel_dispatcher.hpp        # KernelDispatcher class (singleton, thread-safe)
-├── prefill_dispatch_rules.h     # Benchmark-driven rules + static registration
-└── README.md                    # This file
+├── kernel_dispatcher.hpp        # KernelDispatcher 类定义（单例，线程安全）
+├── prefill_dispatch_rules.h     # Benchmark 驱动的调度规则 + 静态注册
+└── README.md                    # 本文件
 
 src/infinicore/dispatch/
-├── kernel_dispatcher.cc         # selectKernel() implementation
-└── prefill_dispatch_rules.cc    # Stub (rules register from .cu compilation units)
+├── kernel_dispatcher.cc         # selectKernel() 实现
+└── prefill_dispatch_rules.cc    # 占位（规则从 .cu 编译单元通过 header 注册）
 ```
 
-### Why rules live in a header, not a .cc file
+### 为什么规则放在 header 而非 .cc 文件
 
-`PagedAttentionPrefillInfo` is defined in `src/infiniop/ops/paged_attention_prefill/info.h`, which is NOT on the include path for `src/infinicore/`. The `.cu` / `.maca` files already include `info.h` through their own headers, so `prefill_dispatch_rules.h` is included there and can access the struct.
+`PagedAttentionPrefillInfo` 定义在 `src/infiniop/ops/paged_attention_prefill/info.h`，该路径不在 `src/infinicore/` 的 include path 中。`.cu` / `.maca` 文件通过自身的头文件链已经 include 了 `info.h`，所以 `prefill_dispatch_rules.h` 在那里被 include 时可以直接使用该结构体。
 
-## Adding Support for a New GPU
+## 新增 GPU 支持
 
-1. Add an `#elif defined(ENABLE_<VENDOR>_API)` block in `prefill_dispatch_rules.h`
-2. Implement `KernelSelectFn` functions using benchmark data from the new hardware
-3. Register them in the `registerPrefillRules()` function
-4. No changes needed to `.cu` files or `kernel_dispatcher.cc`
+1. 在 `prefill_dispatch_rules.h` 中添加 `#elif defined(ENABLE_<VENDOR>_API)` 块
+2. 基于新硬件的 benchmark 数据实现 `KernelSelectFn` 函数
+3. 在 `registerPrefillRules()` 中注册
+4. 无需修改 `.cu` 文件或 `kernel_dispatcher.cc`
 
 ## TODO
 
-### Must-Have (Before Merge to Production)
+### 必须完成（合入主线前）
 
-- [ ] **Compilation verification**: Build with `ENABLE_MUTUAL_AWARENESS` ON/OFF crossed with `ENABLE_NVIDIA_API` / `ENABLE_ILUVATAR_API` / `ENABLE_METAX_API` on their respective platforms
-- [ ] **Fallback verification**: Confirm that with `ENABLE_MUTUAL_AWARENESS=OFF`, behavior is identical to before (no regression)
-- [ ] **Remote benchmark on BI-V150**: Validate that the Iluvatar dispatch rules produce correct kernel choices and match or improve latency vs the previous hardcoded `"warp"` default
-- [ ] **NVIDIA A100 benchmark**: Verify `warpcta8pipe` selection under LATENCY_FIRST goal matches prior benchmark results
+- [ ] **编译验证**：分别用 `ENABLE_MUTUAL_AWARENESS` 开/关 × `ENABLE_NVIDIA_API` / `ENABLE_ILUVATAR_API` / `ENABLE_METAX_API` 在对应平台编译
+- [ ] **回退验证**：确认 `ENABLE_MUTUAL_AWARENESS=OFF` 时行为与改动前完全一致（无回归）
+- [ ] **BI-V150 远程 benchmark**：验证 Iluvatar 调度规则产生正确的 kernel 选择，性能不低于原先硬编码的 `"warp"` 默认值
+- [ ] **A100 benchmark 验证**：确认 LATENCY_FIRST 目标下 `warpcta8pipe` 选择与此前 benchmark 结果一致
 
-### Should-Have
+### 建议完成
 
-- [ ] **BI-200 benchmark & rules**: Iluvatar BI-200 may have different performance characteristics; need new benchmark data and corresponding rules
-- [ ] **Debug logging**: Add `INFINIOP_DEBUG_PREFILL_DISPATCH=1` env var support to log which kernel was selected and why (goal, device, rule match)
-- [ ] **Thread safety audit**: `selectKernel()` reads `table_[]` without lock (reads are concurrent-safe for `std::array` if writes are done before reads, which static init guarantees). Verify no late registration can race.
+- [ ] **BI-200 benchmark 与规则**：Iluvatar BI-200 性能特征可能不同，需要新的 benchmark 数据和对应规则
+- [ ] **调试日志**：支持 `INFINIOP_DEBUG_PREFILL_DISPATCH=1` 环境变量，打印选择了哪个 kernel 及原因（goal、device、规则匹配情况）
+- [ ] **线程安全审计**：`selectKernel()` 读取 `table_[]` 时未加锁（静态初始化保证写入先于读取，`std::array` 并发读安全）。需确认无延迟注册导致的竞态
 
-### Nice-to-Have
+### 可选优化
 
-- [ ] **Python bindings**: `infinicore.dispatch.get_dispatcher()` / `override_kernel()` for debugging and manual override
-- [ ] **JSON-based rule loading**: Load dispatch rules from a config file instead of compiled-in functions (enables benchmark -> auto-generate rules pipeline)
-- [ ] **Per-model-config override**: Allow model deployment configs to pin specific kernels
-- [ ] **Extend to other ops**: Apply the same KernelDispatcher pattern to other operators beyond paged_attention_prefill (e.g., decode attention, GEMM)
+- [ ] **Python 绑定**：`infinicore.dispatch.get_dispatcher()` / `override_kernel()` 用于调试和手动覆盖
+- [ ] **JSON 规则加载**：从配置文件加载调度规则（实现 benchmark -> 自动生成规则的流水线）
+- [ ] **模型配置覆盖**：允许模型部署配置中指定固定 kernel
+- [ ] **扩展到其他算子**：将 KernelDispatcher 模式应用到 paged_attention_prefill 之外的算子（如 decode attention、GEMM）
