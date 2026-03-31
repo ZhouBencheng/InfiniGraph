@@ -69,7 +69,7 @@ infiniStatus_t commInitAll(
     CHECK_HCCL(hcclCommInitAll(hccl_comms.data(), ndevice, (int const *)device_ids));
 
     for (int i = 0; i < ndevice; i++) {
-        comms[i] = new InfinicclComm{INFINI_DEVICE_METAX, device_ids[i], (void *)(hccl_comms[i])};
+        comms[i] = new InfinicclComm{INFINI_DEVICE_METAX, device_ids[i], ndevice, (void *)(hccl_comms[i])};
     }
 
     return INFINI_STATUS_SUCCESS;

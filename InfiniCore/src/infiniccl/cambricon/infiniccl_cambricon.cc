@@ -70,7 +70,7 @@ infiniStatus_t commInitAll(
                              ndevice, nullptr));
 
     for (int i = 0; i < ndevice; i++) {
-        comms[i] = new InfinicclComm{INFINI_DEVICE_CAMBRICON, device_ids[i], (void *)(cncl_comms[i])};
+        comms[i] = new InfinicclComm{INFINI_DEVICE_CAMBRICON, device_ids[i], ndevice, (void *)(cncl_comms[i])};
     }
 
     return INFINI_STATUS_SUCCESS;

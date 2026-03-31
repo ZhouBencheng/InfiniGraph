@@ -6,6 +6,7 @@
 struct InfinicclComm {
     infiniDevice_t device_type;
     int device_id; // the actual device ID, not rank number
+    int world_size;
     void *comm;    // the actual communicator
 };
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../device.hpp"
+#include "../graph/graph.hpp"
 #include "common/op.hpp"
 #include <optional>
 
@@ -8,6 +9,7 @@ namespace infinicore::op {
 
 INFINICORE_GRAPH_OP_CLASS(
     MultiheadAttentionVarlen,
+    infinicore::analyzer::OpType::MHA_VARLEN,
     Tensor,
     const Tensor &,
     const Tensor &,

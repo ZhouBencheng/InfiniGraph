@@ -64,7 +64,7 @@ infiniStatus_t commInitAll(
     CHECK_BKCL(bkcl_comm_init_all(bkcl_comms.data(), ndevice, device_ids));
 
     for (int i = 0; i < ndevice; i++) {
-        comms[i] = new InfinicclComm{INFINI_DEVICE_KUNLUN, device_ids[i], (void *)(bkcl_comms[i])};
+        comms[i] = new InfinicclComm{INFINI_DEVICE_KUNLUN, device_ids[i], ndevice, (void *)(bkcl_comms[i])};
     }
 
     return INFINI_STATUS_SUCCESS;

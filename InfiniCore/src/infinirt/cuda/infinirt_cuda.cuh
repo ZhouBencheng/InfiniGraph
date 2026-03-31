@@ -6,8 +6,10 @@
 namespace infinirt::cuda {
 #ifdef ENABLE_NVIDIA_API
 INFINIRT_DEVICE_API_IMPL
+void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes);
 #else
 INFINIRT_DEVICE_API_NOOP
+inline void recordCommunicationSample(int, infinirtEvent_t, infinirtEvent_t, uint64_t) {}
 #endif
 } // namespace infinirt::cuda
 
@@ -15,8 +17,10 @@ INFINIRT_DEVICE_API_NOOP
 namespace infinirt::iluvatar {
 #ifdef ENABLE_ILUVATAR_API
 INFINIRT_DEVICE_API_IMPL
+void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes);
 #else
 INFINIRT_DEVICE_API_NOOP
+inline void recordCommunicationSample(int, infinirtEvent_t, infinirtEvent_t, uint64_t) {}
 #endif
 } // namespace infinirt::iluvatar
 
@@ -24,8 +28,10 @@ INFINIRT_DEVICE_API_NOOP
 namespace infinirt::qy {
 #ifdef ENABLE_QY_API
 INFINIRT_DEVICE_API_IMPL
+void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes);
 #else
 INFINIRT_DEVICE_API_NOOP
+inline void recordCommunicationSample(int, infinirtEvent_t, infinirtEvent_t, uint64_t) {}
 #endif
 } // namespace infinirt::qy
 
@@ -33,8 +39,10 @@ INFINIRT_DEVICE_API_NOOP
 namespace infinirt::hygon {
 #ifdef ENABLE_HYGON_API
 INFINIRT_DEVICE_API_IMPL
+void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes);
 #else
 INFINIRT_DEVICE_API_NOOP
+inline void recordCommunicationSample(int, infinirtEvent_t, infinirtEvent_t, uint64_t) {}
 #endif
 } // namespace infinirt::hygon
 
@@ -42,8 +50,10 @@ INFINIRT_DEVICE_API_NOOP
 namespace infinirt::ali {
 #ifdef ENABLE_ALI_API
 INFINIRT_DEVICE_API_IMPL
+void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes);
 #else
 INFINIRT_DEVICE_API_NOOP
+inline void recordCommunicationSample(int, infinirtEvent_t, infinirtEvent_t, uint64_t) {}
 #endif
 } // namespace infinirt::ali
 
