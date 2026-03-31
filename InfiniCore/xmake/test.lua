@@ -92,6 +92,19 @@ target("infinicore-test")
     set_installdir(INFINI_ROOT)
 target_end()
 
+target("infinirt-test-analyzer-hw")
+    set_kind("binary")
+    set_default(false)
+    add_deps("infinirt")
+    on_install(function (target) end)
+
+    set_languages("cxx17")
+    set_warnings("all", "error")
+
+    add_files(os.projectdir().."/src/infinirt-test/test_analyzer_hw.cc")
+    set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))
+target_end()
+
 target("analyzer-test")
     set_kind("binary")
     set_default(false)
