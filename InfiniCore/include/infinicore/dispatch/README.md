@@ -92,12 +92,16 @@ src/infinicore/dispatch/
 ### 建议完成
 
 - [ ] **BI-200 benchmark 与规则**：Iluvatar BI-200 性能特征可能不同，需要新的 benchmark 数据和对应规则
-- [ ] **调试日志**：支持 `INFINIOP_DEBUG_PREFILL_DISPATCH=1` 环境变量，打印选择了哪个 kernel 及原因（goal、device、规则匹配情况）
-- [ ] **线程安全审计**：`selectKernel()` 读取 `table_[]` 时未加锁（静态初始化保证写入先于读取，`std::array` 并发读安全）。需确认无延迟注册导致的竞态
+- [x] **调试日志**：`INFINIOP_DEBUG_PREFILL_DISPATCH=1` 输出 `[dispatch] op=xxx device=XXX goal=xxx -> kernel=xxx`
+- [x] **线程安全**：`selectKernel()` 读表时加 mutex 锁保护
 
 ### 可选优化
 
-- [ ] **Python 绑定**：`infinicore.dispatch.get_dispatcher()` / `override_kernel()` 用于调试和手动覆盖
-- [ ] **JSON 规则加载**：从配置文件加载调度规则（实现 benchmark -> 自动生成规则的流水线）
+- [x] **Python 绑定**：`infinicore.dispatch.dump_rules()` / `select_kernel()` / `has_rule()`
+- [ ] **JSON 规则加载**：从配置文件加载调度规则
 - [ ] **模型配置覆盖**：允许模型部署配置中指定固定 kernel
-- [ ] **扩展到其他算子**：将 KernelDispatcher 模式应用到 paged_attention_prefill 之外的算子（如 decode attention、GEMM）
+- [ ] **扩展到其他算子**：将 KernelDispatcher 模式应用到其他算子（decode attention、GEMM）
+
+## 测试
+
+测试脚本和详细流程见 `tests/dispatch/TESTING.md`。

@@ -72,6 +72,29 @@ public:
         Device::Type device,
         const void *op_info) const;
 
+    /// Select with an explicit goal (bypasses analyzer query).
+    const char *selectKernelWithGoal(
+        analyzer::OpType op,
+        Device::Type device,
+        analyzer::OptimizationGoal goal,
+        const void *op_info) const {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto k = key(op, device, goal);
+        KernelSelectFn fn = (k < kTableSize) ? table_[k] : nullptr;
+        if (fn != nullptr) return fn(op_info);
+        return nullptr;
+    }
+
+    /// Check if a rule is registered for the given triple.
+    bool hasRule(
+        analyzer::OpType op,
+        Device::Type device,
+        analyzer::OptimizationGoal goal) const {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto k = key(op, device, goal);
+        return (k < kTableSize) && (table_[k] != nullptr);
+    }
+
 private:
     KernelDispatcher() { table_.fill(nullptr); }
 
