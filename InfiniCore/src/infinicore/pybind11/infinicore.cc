@@ -12,6 +12,7 @@
 
 #ifdef ENABLE_MUTUAL_AWARENESS
 #include "analyzer.hpp"
+#include "dispatch.hpp"
 #endif
 
 namespace infinicore {
@@ -27,6 +28,7 @@ PYBIND11_MODULE(_infinicore, m) {
 
 #ifdef ENABLE_MUTUAL_AWARENESS
     analyzer::pybind::bind(m);
+    dispatch::pybind::bind(m);
 #endif
 }
 

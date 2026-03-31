@@ -14,7 +14,21 @@
 
 #include "../cuda/kernel_v2.cuh"
 
+#ifdef ENABLE_MUTUAL_AWARENESS
+#include "infinicore/dispatch/prefill_dispatch_rules.h"
+#endif
+
 namespace op::paged_attention_prefill::nvidia {
+
+// Compile-time device type for KernelDispatcher lookup.
+static constexpr infinicore::Device::Type kDeviceType =
+#if defined(ENABLE_ILUVATAR_API)
+    infinicore::Device::Type::ILUVATAR;
+#elif defined(ENABLE_ALI_API)
+    infinicore::Device::Type::ALI;
+#else
+    infinicore::Device::Type::NVIDIA;
+#endif
 
 namespace {
 constexpr size_t ceilDiv(size_t a, size_t b) {
@@ -22,21 +36,25 @@ constexpr size_t ceilDiv(size_t a, size_t b) {
 }
 
 inline const char *default_prefill_kernel(const PagedAttentionPrefillInfo &info) {
-    // Iluvatar: use warp (stable). Users can override via INFINIOP_FLASH_PREFILL_KERNEL.
+#ifdef ENABLE_MUTUAL_AWARENESS
+    // Query the independent kernel dispatch module.
+    const char *k = infinicore::dispatch::KernelDispatcher::instance()
+        .selectKernel(
+            infinicore::analyzer::OpType::PAGED_ATTENTION_PREFILL,
+            kDeviceType,
+            &info);
+    if (k) return k;
+#endif
+    // Fallback: original heuristic (used when ENABLE_MUTUAL_AWARENESS is off
+    // or no dispatch rule is registered for this device).
 #ifdef ENABLE_ILUVATAR_API
     (void)info;
     return "warp";
 #endif
-    // Heuristic auto-dispatch (v0.4):
-    // - Prefer the pipelined + tile-wise softmax kernel on FA2-compatible block_size=256.
-    // - Keep a conservative fallback for other shapes / older GPUs (cp.async is a no-op below SM80).
-    //
-    // Users can always override via INFINIOP_FLASH_PREFILL_KERNEL.
     if (info.page_block_size == 256 && (info.dtype == INFINI_DTYPE_F16 || info.dtype == INFINI_DTYPE_BF16)) {
         if (info.head_size == 128) {
             return "warpcta8pipe";
         }
-        // For head_size=64 we keep the previous default until we have broader perf coverage.
     }
     return "warpcta8";
 }

@@ -519,6 +519,7 @@ target("infinicore_cpp_api")
     add_files("src/infinicore/ops/*/*.cc")
     add_files("src/infinicore/ops/*/*/*.cc")
     add_files("src/infinicore/analyzer/*.cc")
+    add_files("src/infinicore/dispatch/*.cc")
     add_files("src/utils/*.cc")
 
     set_installdir(INFINI_ROOT)
