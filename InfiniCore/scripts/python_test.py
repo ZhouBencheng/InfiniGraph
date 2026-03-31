@@ -19,6 +19,7 @@ def run_tests(args):
         "conv.py",
         # "dequantize_awq.py",
         # "dequantize_gptq.py",
+        "fused_ffn.py",
         "gelu.py",
         "gemm.py",
         # "layer_norm.py",
