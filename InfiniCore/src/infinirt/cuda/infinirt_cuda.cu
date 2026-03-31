@@ -1,13 +1,14 @@
 #include "../../utils.h"
 #include "infinirt_cuda.cuh"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <deque>
 #include <mutex>
 #include <unordered_map>
 
-#if defined(ENABLE_NVIDIA_API) && !defined(_WIN32)
+#if !defined(_WIN32)
 #include <dlfcn.h>
 #endif
 
@@ -21,7 +22,10 @@
         }                                            \
     } while (0)
 
-#if defined(ENABLE_NVIDIA_API) && !defined(_WIN32)
+// ============================================================
+// Communication sampling — shared by all CUDA-like backends
+// (NVIDIA, Iluvatar, QY, Hygon, Ali, …)
+// ============================================================
 namespace {
 
 struct PendingCommunicationSample {
@@ -124,6 +128,44 @@ void flushCompletedCommunicationSamples(int device_id, DeviceCommunicationState 
     }
 }
 
+void populateCommunicationSnapshot(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &store = communicationStatsStore();
+    std::lock_guard<std::mutex> lock(store.mutex);
+    auto &state = store.per_device[device_id];
+
+    flushCompletedCommunicationSamples(device_id, state);
+    auto now = std::chrono::steady_clock::now();
+    pruneCommunicationWindow(state, now);
+
+    double total_comm_ms = 0.0;
+    uint64_t total_comm_bytes = 0;
+    for (auto const &sample : state.recent) {
+        total_comm_ms += sample.duration_ms;
+        total_comm_bytes += sample.bytes;
+    }
+
+    double window_ms = std::chrono::duration<double, std::milli>(kCommunicationWindow).count();
+
+    snapshot->communication_bytes = total_comm_bytes;
+    // Avoid std::min — Corex SDK cuda_wrappers/algorithm conflicts with
+    // the standard library on float-vs-double template deduction.
+    double ratio = total_comm_ms / window_ms;
+    snapshot->communication_time_ratio = static_cast<float>(ratio > 1.0 ? 1.0 : ratio);
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_COMMUNICATION;
+}
+
+} // namespace
+
+// ============================================================
+// GPU utilization via management library (NVML / IXML)
+//
+// NVIDIA: dlopen libnvidia-ml.so  → nvml* symbols
+// Iluvatar: dlopen libixml.so     → same nvml* symbols (IXML is
+//           an NVML-compatible management library)
+// ============================================================
+#if !defined(_WIN32) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_ILUVATAR_API))
+namespace {
+
 typedef struct nvmlDevice_st *nvmlDevice_t;
 typedef int nvmlReturn_t;
 
@@ -153,9 +195,13 @@ NvmlApi &nvmlApi() {
     static NvmlApi api = []() {
         NvmlApi loaded;
         const char *candidates[] = {
+#if defined(ENABLE_NVIDIA_API)
             "libnvidia-ml.so.1",
             "libnvidia-ml.so",
             "libnvidia-ml.dylib",
+#elif defined(ENABLE_ILUVATAR_API)
+            "libixml.so",
+#endif
         };
 
         for (auto candidate : candidates) {
@@ -218,33 +264,6 @@ bool tryPopulateNvmlUtilization(int device_id, infinirtDeviceResourceSnapshot_t 
 
 } // namespace
 #endif
-
-namespace {
-
-void populateCommunicationSnapshot(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
-    auto &store = communicationStatsStore();
-    std::lock_guard<std::mutex> lock(store.mutex);
-    auto &state = store.per_device[device_id];
-
-    flushCompletedCommunicationSamples(device_id, state);
-    auto now = std::chrono::steady_clock::now();
-    pruneCommunicationWindow(state, now);
-
-    double total_comm_ms = 0.0;
-    uint64_t total_comm_bytes = 0;
-    for (auto const &sample : state.recent) {
-        total_comm_ms += sample.duration_ms;
-        total_comm_bytes += sample.bytes;
-    }
-
-    double window_ms = std::chrono::duration<double, std::milli>(kCommunicationWindow).count();
-
-    snapshot->communication_bytes = total_comm_bytes;
-    snapshot->communication_time_ratio = static_cast<float>(std::min(1.0, total_comm_ms / window_ms));
-    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_COMMUNICATION;
-}
-
-} // namespace
 
 // 根据宏定义选择命名空间并实现
 #if defined(ENABLE_NVIDIA_API)
@@ -327,7 +346,7 @@ infiniStatus_t getDeviceResourceSnapshot(int device_id, infinirtDeviceResourceSn
     }
     snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY;
 
-#if defined(ENABLE_NVIDIA_API) && !defined(_WIN32)
+#if !defined(_WIN32) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_ILUVATAR_API))
     (void)tryPopulateNvmlUtilization(device_id, snapshot);
 #endif
     populateCommunicationSnapshot(device_id, snapshot);
