@@ -6,7 +6,7 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(Add, infinicore::analyzer::OpType::ADD, Tensor, const Tensor &, const Tensor &);
+INFINICORE_GRAPH_OP_CLASS(Add, Tensor, const Tensor &, const Tensor &);
 
 Tensor add(const Tensor &a, const Tensor &b);
 void add_(Tensor c, const Tensor &a, const Tensor &b);

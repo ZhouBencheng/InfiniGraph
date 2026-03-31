@@ -3,7 +3,6 @@
 #include <memory>
 #include <vector>
 
-#include "../analyzer/op_type.hpp"
 #include "../tensor.hpp"
 
 namespace infinicore::graph {
@@ -54,12 +53,11 @@ private:
 };
 } // namespace infinicore::graph
 
-#define INFINICORE_GRAPH_OP_CLASS(__OP_NAME__, __OP_TYPE_ID__, ...)        \
+#define INFINICORE_GRAPH_OP_CLASS(__OP_NAME__, ...)                        \
     class __OP_NAME__ : public graph::DispatchableGraphOperator {          \
     public:                                                                \
         using schema = void (*)(__VA_ARGS__);                              \
         using plan_schema = void *(*)(__VA_ARGS__);                        \
-        static constexpr infinicore::analyzer::OpType op_type_id = __OP_TYPE_ID__; \
         static common::OpDispatcher<plan_schema> &plan_dispatcher();       \
         static common::OpDispatcher<run_schema> &run_dispatcher();         \
         static common::OpDispatcher<cleanup_schema> &cleanup_dispatcher(); \
@@ -90,22 +88,24 @@ private:
 
 #ifdef ENABLE_MUTUAL_AWARENESS
 #include "../analyzer/op_trace.hpp"
+#include "../analyzer/op_type_registry.hpp"
 
 #define _INFINICORE_TRACE_OP(__OP_NAME__, __TRACE_TENSOR__)                \
     do {                                                                    \
+        auto __op_type = infinicore::analyzer::opTypeFromName(#__OP_NAME__); \
         auto &&__trace_tensor = (__TRACE_TENSOR__);                         \
         if (__trace_tensor) {                                               \
             const auto &__trace_shape = __trace_tensor->shape();            \
             const auto __trace_device = __trace_tensor->device();           \
             infinicore::analyzer::traceOp(                                  \
-                __OP_NAME__::op_type_id,                                    \
+                __op_type,                                                  \
                 __trace_shape.data(),                                       \
                 __trace_shape.size(),                                       \
                 static_cast<uint8_t>(__trace_tensor->dtype()),              \
                 static_cast<uint8_t>(__trace_device.getType()),             \
                 static_cast<int8_t>(__trace_device.getIndex()));            \
         } else {                                                            \
-            infinicore::analyzer::traceOp(__OP_NAME__::op_type_id, nullptr, 0, 0, 0, -1); \
+            infinicore::analyzer::traceOp(__op_type, nullptr, 0, 0, 0, -1); \
         }                                                                   \
     } while (0)
 #else

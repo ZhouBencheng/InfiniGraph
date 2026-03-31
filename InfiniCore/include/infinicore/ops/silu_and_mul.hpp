@@ -6,7 +6,7 @@
 
 namespace infinicore::op {
 
-INFINICORE_GRAPH_OP_CLASS(SiluAndMul, infinicore::analyzer::OpType::SILU_AND_MUL, Tensor, const Tensor &);
+INFINICORE_GRAPH_OP_CLASS(SiluAndMul, Tensor, const Tensor &);
 
 Tensor silu_and_mul(const Tensor &x);
 void silu_and_mul_(Tensor out, const Tensor &x);
