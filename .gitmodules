@@ -1,0 +1,13 @@
+[submodule "InfiniCore/third_party/spdlog"]
+	path = InfiniCore/third_party/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "InfiniCore/third_party/nlohmann_json"]
+	path = InfiniCore/third_party/nlohmann_json
+	url = https://github.com/nlohmann/json.git
+	branch = master
+[submodule "InfiniLM/third_party/spdlog"]
+	path = InfiniLM/third_party/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "InfiniLM/third_party/json"]
+	path = InfiniLM/third_party/json
+	url = https://github.com/nlohmann/json.git
