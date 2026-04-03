@@ -15,6 +15,8 @@ def install(xmake_config_flags=""):
     run_cmd(f"xmake f {xmake_config_flags} -cv")
     run_cmd("xmake")
     run_cmd("xmake install")
+    run_cmd("xmake build -y _infinicore")
+    run_cmd("xmake install _infinicore")
     run_cmd("xmake build infiniop-test")
     run_cmd("xmake install infiniop-test")
 

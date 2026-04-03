@@ -1,6 +1,7 @@
 import subprocess
 from setuptools import setup, find_packages
 from setuptools.command.build import build
+from setuptools.command.develop import develop
 
 def run_xmake_build():
     print("Running xmake build...")
@@ -14,21 +15,28 @@ class Build(build):
         run_xmake_build()
         super().run()
 
+class Develop(develop):
+    def run(self):
+        run_xmake_build()
+        super().run()
+
 setup(
     # 1. Find main packages and manually add test/framework packages
     packages=find_packages(where="python") + [
-        "infinicore.test", 
-        "infinicore.test.framework"
+        "infinicore.test",
+        "infinicore.test.framework",
+        "infinicore.lib",
     ],
-    
+
     # 2. Directory mappings
     package_dir={
         "": "python",  # Root package is under python/ directory
         "infinicore.test": "test/infinicore"  # Intermediate package mapping
     },
-    
+
     # 3. Register commands
     cmdclass={
-        "build": Build
+        "build": Build,
+        "develop": Develop,
     }
 )

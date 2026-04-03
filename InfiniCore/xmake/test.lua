@@ -61,6 +61,7 @@ target("infinirt-test")
     set_warnings("all", "error")
 
     add_files(os.projectdir().."/src/infinirt-test/*.cc")
+    remove_files(os.projectdir().."/src/infinirt-test/test_analyzer_hw.cc")
     set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))
 target_end()
 

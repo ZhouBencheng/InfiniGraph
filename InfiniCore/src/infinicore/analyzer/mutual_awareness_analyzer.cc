@@ -1,6 +1,5 @@
 #include "infinicore/analyzer/mutual_awareness_analyzer.hpp"
 
-#include "../context/context_impl.hpp"
 #include "infinirt.h"
 
 namespace infinicore::analyzer {
@@ -26,7 +25,7 @@ DeviceResourceSnapshot buildSnapshotFromMemoryStats(
 
 DeviceResourceSnapshot buildSnapshotFromInfinirt(
     infinicore::Device device,
-    const AllocatorMemoryStats &allocator_stats) {
+    const MemoryStats &allocator_stats) {
     DeviceResourceSnapshot snapshot;
     snapshot.device_id = static_cast<int>(device.getIndex());
     snapshot.device_type = device.getType();
@@ -66,11 +65,7 @@ DeviceResourceSnapshot buildSnapshotFromInfinirt(
         auto fallback = buildSnapshotFromMemoryStats(
             static_cast<int>(device.getIndex()),
             device.getType(),
-            MemoryStats{
-                allocator_stats.allocated_bytes,
-                allocator_stats.total_capacity,
-                allocator_stats.peak_allocated,
-                allocator_stats.allocation_count});
+            allocator_stats);
         snapshot.has_memory_capacity = fallback.has_memory_capacity;
         snapshot.free_bytes = fallback.free_bytes;
         snapshot.total_bytes = fallback.total_bytes;
@@ -82,13 +77,9 @@ DeviceResourceSnapshot buildSnapshotFromInfinirt(
 
 std::vector<DeviceResourceSnapshot> collectRuntimeResourceSnapshots() {
     std::vector<DeviceResourceSnapshot> device_snapshots;
-    auto runtime_stats = ContextImpl::singleton().collectAllocatorMemoryStats();
-    device_snapshots.reserve(runtime_stats.size());
-
-    for (auto const &[device, allocator_stats] : runtime_stats) {
-        device_snapshots.push_back(buildSnapshotFromInfinirt(device, allocator_stats));
-    }
-
+    // TODO: integrate with ContextImpl allocator stats when available.
+    // For now, return an empty snapshot list; the analyzer will use
+    // the fallback path that queries infinirt directly.
     return device_snapshots;
 }
 

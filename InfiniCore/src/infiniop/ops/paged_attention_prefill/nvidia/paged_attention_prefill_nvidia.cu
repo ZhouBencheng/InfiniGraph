@@ -20,16 +20,6 @@
 
 namespace op::paged_attention_prefill::nvidia {
 
-// Compile-time device type for KernelDispatcher lookup.
-static constexpr infinicore::Device::Type kDeviceType =
-#if defined(ENABLE_ILUVATAR_API)
-    infinicore::Device::Type::ILUVATAR;
-#elif defined(ENABLE_ALI_API)
-    infinicore::Device::Type::ALI;
-#else
-    infinicore::Device::Type::NVIDIA;
-#endif
-
 namespace {
 constexpr size_t ceilDiv(size_t a, size_t b) {
     return (a + b - 1) / b;
@@ -38,6 +28,14 @@ constexpr size_t ceilDiv(size_t a, size_t b) {
 inline const char *default_prefill_kernel(const PagedAttentionPrefillInfo &info) {
 #ifdef ENABLE_MUTUAL_AWARENESS
     // Query the independent kernel dispatch module.
+    static constexpr infinicore::Device::Type kDeviceType =
+#if defined(ENABLE_ILUVATAR_API)
+        infinicore::Device::Type::ILUVATAR;
+    #elif defined(ENABLE_ALI_API)
+        infinicore::Device::Type::ALI;
+    #else
+        infinicore::Device::Type::NVIDIA;
+    #endif
     const char *k = infinicore::dispatch::KernelDispatcher::instance()
         .selectKernel(
             infinicore::analyzer::OpType::PAGED_ATTENTION_PREFILL,

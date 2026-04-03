@@ -558,6 +558,16 @@ target("_infinicore")
     add_files("src/infinicore/pybind11/**.cc")
 
     set_installdir("python/infinicore")
+    after_install(function (target)
+        local libdir = path.join(target:installdir(), "lib")
+        if not os.isdir(libdir) then
+            os.mkdir(libdir)
+        end
+        local initfile = path.join(libdir, "__init__.py")
+        if not os.isfile(initfile) then
+            io.writefile(initfile, "")
+        end
+    end)
 target_end()
 
 option("editable")
