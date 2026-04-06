@@ -61,19 +61,18 @@ INFINIOP_CUDA_KERNEL rmsnormKernel(
     }
 }
 
-// SwiGLU transform kernel
-// Computes: out[i] = silu(gate[i]) * up[i] where silu(x) = x * sigmoid(x)
-// gate_up buffer has shape [ntok, 2*di], we transform in-place to [ntok, di]
+// SwiGLU transform kernel (in-place)
+// Computes: gate_up[i] = silu(gate_up[i]) * gate_up[di+i] for i in [0, di)
+// Writes result to the gate half of gate_up, overwriting gate values.
+// This matches the non-fused path's buffer layout (hidden at stride 2*di).
 template <unsigned int BLOCK_SIZE, typename Tcompute, typename Tdata>
 __device__ void swigluBlock(
-    Tdata *__restrict__ out,
-    const Tdata *__restrict__ gate_up,
+    Tdata *__restrict__ gate_up,
     size_t intermediate_dim,
     ptrdiff_t stride) {
 
     size_t token_idx = blockIdx.x;
     auto gate_up_ptr = gate_up + token_idx * stride;
-    auto out_ptr = out + token_idx * stride / 2; // Output stride is half
 
     for (size_t i = threadIdx.x; i < intermediate_dim; i += BLOCK_SIZE) {
         Tcompute gate = Tcompute(gate_up_ptr[i]);
@@ -83,20 +82,19 @@ __device__ void swigluBlock(
         Tcompute sigmoid = Tcompute(1.0f) / (Tcompute(1.0f) + exp_(-gate));
         Tcompute silu = gate * sigmoid;
 
-        out_ptr[i] = Tdata(silu * up);
+        gate_up_ptr[i] = Tdata(silu * up);
     }
 }
 
 template <unsigned int BLOCK_SIZE, typename Tcompute, typename Tdata>
 INFINIOP_CUDA_KERNEL swigluKernel(
-    Tdata *__restrict__ out,
-    const Tdata *__restrict__ gate_up,
+    Tdata *__restrict__ gate_up,
     size_t ntok,
     size_t intermediate_dim,
     ptrdiff_t stride) {
     if (blockIdx.x < ntok) {
         swigluBlock<BLOCK_SIZE, Tcompute>(
-            out, gate_up, intermediate_dim, stride);
+            gate_up, intermediate_dim, stride);
     }
 }
 

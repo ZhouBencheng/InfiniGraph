@@ -1,6 +1,7 @@
 #include "inference_context.hpp"
 #include "../tensor.hpp"
 #include "../utils.hpp"
+#include "infiniop/ops/fused_ffn.h"
 
 InferenceContext::InferenceContext(infiniopHandle_t op_handle_, std::shared_ptr<MemoryPool> memory_pool_, CacheManager *cache_manager, infinirtStream_t stream)
     : op_handle(op_handle_), memory_pool(memory_pool_), cache_manager(cache_manager), stream(stream) {}
@@ -368,4 +369,35 @@ void InferenceContext::dequant(std::shared_ptr<Tensor> weight,
         RUN_INFINI(infiniopDequantizeGPTQ(desc, workspace_storage->memory(), workspace_size,
                                          weight->data(), in_w->data(), in_s->data(), in_z->data(), in_g_idx->data(), stream));
     }
+}
+
+void InferenceContext::fused_ffn(std::shared_ptr<Tensor> out,
+                                  std::shared_ptr<Tensor> in,
+                                  std::shared_ptr<Tensor> residual,
+                                  std::shared_ptr<Tensor> norm_weight,
+                                  std::shared_ptr<Tensor> gate_up_weight,
+                                  std::shared_ptr<Tensor> down_weight,
+                                  float epsilon) {
+    size_t key = CacheManager::createDescriptorKey(out, in, residual, norm_weight, gate_up_weight, down_weight);
+
+    infiniopFusedFFNDescriptor_t desc;
+    if (!cache_manager->getFusedFFNDescriptor(key, desc)) {
+        RUN_INFINI(infiniopCreateFusedFFNDescriptor(
+            op_handle, &desc, out->desc(), in->desc(),
+            residual ? residual->desc() : nullptr,
+            norm_weight->desc(), gate_up_weight->desc(), down_weight->desc(), epsilon));
+        cache_manager->putFusedFFNDescriptor(key, desc);
+    }
+
+    size_t workspace_size = 0;
+    RUN_INFINI(infiniopGetFusedFFNWorkspaceSize(desc, &workspace_size));
+    ensure_workspace(workspace_size);
+    void *workspace = workspace_storage->memory();
+
+    RUN_INFINI(infiniopFusedFFN(
+        desc, workspace, workspace_size,
+        out->data(), in->data(),
+        residual ? residual->data() : nullptr,
+        norm_weight->data(), gate_up_weight->data(), down_weight->data(),
+        stream));
 }

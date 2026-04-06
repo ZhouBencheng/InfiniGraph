@@ -9,6 +9,7 @@
 #include "../tensor.hpp"
 #include "../utils.hpp"
 #include "infinicore_infer.h"
+#include "infiniop/ops/fused_ffn.h"
 
 class IDescriptorDestroyer {
 public:
@@ -166,6 +167,7 @@ public:
     DECLARE_OP_CACHE(RandomSample)
     DECLARE_OP_CACHE(DequantizeAWQ)
     DECLARE_OP_CACHE(DequantizeGPTQ)
+    DECLARE_OP_CACHE(FusedFFN)
 
     CacheManager(size_t capacity = 100)
         : Add_cache(capacity, DESTROY_FUNC(Add)),
@@ -181,7 +183,8 @@ public:
           Silu_cache(capacity, DESTROY_FUNC(Silu)),
           RandomSample_cache(capacity, DESTROY_FUNC(RandomSample)),
           DequantizeAWQ_cache(capacity, DESTROY_FUNC(DequantizeAWQ)),
-          DequantizeGPTQ_cache(capacity, DESTROY_FUNC(DequantizeGPTQ)) {}
+          DequantizeGPTQ_cache(capacity, DESTROY_FUNC(DequantizeGPTQ)),
+          FusedFFN_cache(capacity, DESTROY_FUNC(FusedFFN)) {}
 
     template <typename... Tensors>
     static size_t createDescriptorKey(Tensors... tensors) {

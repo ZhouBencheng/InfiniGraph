@@ -12,7 +12,8 @@ class FusedFFNInfo {
 
 public:
     infiniDtype_t dtype;
-    infiniDtype_t wtype;
+    infiniDtype_t wtype; // norm weight dtype
+    infiniDtype_t mtype; // matrix weight dtype (gate_up, down)
     float epsilon;
     std::vector<size_t> shape;
     ptrdiff_t in_stride;
@@ -37,24 +38,38 @@ public:
 
         auto dtype = out_desc->dtype();
         auto wtype = norm_weight_desc->dtype();
+        auto mtype = gate_up_weight_desc->dtype();
 
         // Check that input and output have the same dtype
         if (in_desc->dtype() != dtype) {
             return INFINI_STATUS_BAD_TENSOR_DTYPE;
         }
 
-        // Check weight dtypes
-        if (gate_up_weight_desc->dtype() != wtype || down_weight_desc->dtype() != wtype) {
+        // Check matrix weight dtypes (gate_up and down must match each other)
+        if (down_weight_desc->dtype() != mtype) {
             return INFINI_STATUS_BAD_TENSOR_DTYPE;
         }
 
-        // For half-precision types, weights can be same type or FP32
+        // Validate norm weight dtype: for half-precision activations, can be same or FP32
         if (dtype == INFINI_DTYPE_F16 || dtype == INFINI_DTYPE_BF16) {
             if (wtype != dtype && wtype != INFINI_DTYPE_F32) {
                 return INFINI_STATUS_BAD_TENSOR_DTYPE;
             }
         } else if (dtype == INFINI_DTYPE_F32) {
             if (wtype != INFINI_DTYPE_F32) {
+                return INFINI_STATUS_BAD_TENSOR_DTYPE;
+            }
+        } else {
+            return INFINI_STATUS_BAD_TENSOR_DTYPE;
+        }
+
+        // Validate matrix weight dtype: for half-precision activations, can be same or FP32
+        if (dtype == INFINI_DTYPE_F16 || dtype == INFINI_DTYPE_BF16) {
+            if (mtype != dtype && mtype != INFINI_DTYPE_F32) {
+                return INFINI_STATUS_BAD_TENSOR_DTYPE;
+            }
+        } else if (dtype == INFINI_DTYPE_F32) {
+            if (mtype != INFINI_DTYPE_F32) {
                 return INFINI_STATUS_BAD_TENSOR_DTYPE;
             }
         } else {
@@ -83,31 +98,47 @@ public:
             return INFINI_STATUS_BAD_TENSOR_SHAPE;
         }
 
-        // Check gate_up_weight is 2D [2*intermediate_dim, hidden_dim]
+        // Check gate_up_weight is 2D with shape either [2*intermediate_dim, hidden_dim] or [hidden_dim, 2*intermediate_dim]
         if (gate_up_weight_desc->ndim() != 2) {
             return INFINI_STATUS_BAD_TENSOR_SHAPE;
         }
-        size_t gate_up_rows = gate_up_weight_desc->dim(0);
-        size_t gate_up_cols = gate_up_weight_desc->dim(1);
-        if (gate_up_cols != hidden_dim || gate_up_rows % 2 != 0) {
+        size_t gate_up_dim0 = gate_up_weight_desc->dim(0);
+        size_t gate_up_dim1 = gate_up_weight_desc->dim(1);
+        size_t intermediate_dim;
+        if (gate_up_dim1 == hidden_dim && gate_up_dim0 % 2 == 0) {
+            // Layout A: [2*intermediate_dim, hidden_dim]
+            intermediate_dim = gate_up_dim0 / 2;
+        } else if (gate_up_dim0 == hidden_dim && gate_up_dim1 % 2 == 0) {
+            // Layout B: [hidden_dim, 2*intermediate_dim]
+            intermediate_dim = gate_up_dim1 / 2;
+        } else {
             return INFINI_STATUS_BAD_TENSOR_SHAPE;
         }
-        size_t intermediate_dim = gate_up_rows / 2;
 
-        // Check down_weight is 2D [hidden_dim, intermediate_dim]
+        // Check down_weight is 2D with shape either [hidden_dim, intermediate_dim] or [intermediate_dim, hidden_dim]
         if (down_weight_desc->ndim() != 2) {
             return INFINI_STATUS_BAD_TENSOR_SHAPE;
         }
-        if (down_weight_desc->dim(0) != hidden_dim || down_weight_desc->dim(1) != intermediate_dim) {
-            return INFINI_STATUS_BAD_TENSOR_SHAPE;
+        {
+            size_t dw_dim0 = down_weight_desc->dim(0);
+            size_t dw_dim1 = down_weight_desc->dim(1);
+            if (!((dw_dim0 == hidden_dim && dw_dim1 == intermediate_dim) ||
+                  (dw_dim0 == intermediate_dim && dw_dim1 == hidden_dim))) {
+                return INFINI_STATUS_BAD_TENSOR_SHAPE;
+            }
         }
 
-        // Check contiguity of the last dimension
+        // Check contiguity of the last dimension for activation tensors and norm weights
         if (out_desc->stride(out_ndim - 1) != 1 ||
             in_desc->stride(in_ndim - 1) != 1 ||
-            norm_weight_desc->stride(0) != 1 ||
-            gate_up_weight_desc->stride(1) != 1 ||
-            down_weight_desc->stride(1) != 1) {
+            norm_weight_desc->stride(0) != 1) {
+            return INFINI_STATUS_BAD_TENSOR_STRIDES;
+        }
+        // For matrix weights, at least one stride dimension must be 1 (contiguous along one axis)
+        if (gate_up_weight_desc->stride(0) != 1 && gate_up_weight_desc->stride(1) != 1) {
+            return INFINI_STATUS_BAD_TENSOR_STRIDES;
+        }
+        if (down_weight_desc->stride(0) != 1 && down_weight_desc->stride(1) != 1) {
             return INFINI_STATUS_BAD_TENSOR_STRIDES;
         }
 
@@ -133,6 +164,7 @@ public:
         FusedFFNInfo info;
         info.dtype = dtype;
         info.wtype = wtype;
+        info.mtype = mtype;
         info.epsilon = epsilon;
         info.shape = out_desc->shape();
         info.in_stride = in_desc->stride(0);

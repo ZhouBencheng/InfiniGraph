@@ -79,6 +79,14 @@ struct InferenceContext {
                  std::shared_ptr<Tensor> in_z,
                  QuantType type,
                  std::shared_ptr<Tensor> in_g_idx = nullptr);
+
+    void fused_ffn(std::shared_ptr<Tensor> out,
+                   std::shared_ptr<Tensor> in,
+                   std::shared_ptr<Tensor> residual,
+                   std::shared_ptr<Tensor> norm_weight,
+                   std::shared_ptr<Tensor> gate_up_weight,
+                   std::shared_ptr<Tensor> down_weight,
+                   float epsilon);
 };
 
 namespace {
@@ -179,4 +187,14 @@ inline void dequant_linear(std::shared_ptr<Tensor> out, std::shared_ptr<Tensor> 
     auto w = Tensor::buffer(x->dtype(), {x->shape()[1], out->shape()[1]}, getInferenceContext().memory_pool);
     getInferenceContext().dequant(w, w_w, w_s, w_z, type, w_g_idx);
     getInferenceContext().linear(out, x, w, alpha, beta, residual, bias);
+}
+
+inline void fused_ffn(std::shared_ptr<Tensor> out,
+                       std::shared_ptr<Tensor> in,
+                       std::shared_ptr<Tensor> residual,
+                       std::shared_ptr<Tensor> norm_weight,
+                       std::shared_ptr<Tensor> gate_up_weight,
+                       std::shared_ptr<Tensor> down_weight,
+                       float epsilon) {
+    getInferenceContext().fused_ffn(out, in, residual, norm_weight, gate_up_weight, down_weight, epsilon);
 }

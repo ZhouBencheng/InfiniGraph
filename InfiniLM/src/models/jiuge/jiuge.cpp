@@ -73,11 +73,22 @@ void createDeviceResource(JiugeDeviceResource *rsrc, const JiugeMeta *meta,
         comm,
         memory_pool,
     };
+    RUN_INFINI(infinirtEventCreate(&rsrc->ffn_start_event));
+    RUN_INFINI(infinirtEventCreate(&rsrc->ffn_end_event));
     RUN_INFINI(infinirtDeviceSynchronize());
 }
 
 void releaseDeviceResource(JiugeDeviceResource &res) {
     infinirtDeviceSynchronize();
+    // Release profiling events
+    if (res.ffn_start_event) {
+        infinirtEventDestroy(res.ffn_start_event);
+        res.ffn_start_event = nullptr;
+    }
+    if (res.ffn_end_event) {
+        infinirtEventDestroy(res.ffn_end_event);
+        res.ffn_end_event = nullptr;
+    }
     // Release individual Tensors
     res.w_in_embd.reset();
     res.w_out_norm.reset();
@@ -261,10 +272,33 @@ void inferDeviceBatch(const JiugeMeta &meta, JiugeDeviceResource &rsrc,
             RUN_INFINI(infinirtStreamSynchronize(stream));
         }
         // 2. FFN
-        rmsnorm(logits_out, logits_in, rsrc.w_ffn_norm[layer], meta.epsilon);
-        linear(gate_up_buf, logits_out, rsrc.w_ffn_gate_up[layer], 1.0, 0.0, nullptr, nullptr);
-        swiglu(gate_buf, up_buf, gate_buf);
-        linear(logits_in, gate_buf, rsrc.w_ffn_down[layer], 1.0, 0.0, idev == 0 ? logits_in : nullptr, nullptr); // only rank 0 adds residual
+        // Reset profiling data at first layer
+        if (layer == 0) {
+            rsrc.ffn_layer_times_ms.clear();
+            rsrc.ffn_total_time_ms = 0;
+        }
+
+        RUN_INFINI(infinirtEventRecord(rsrc.ffn_start_event, stream));
+
+        if (rsrc.use_fused_ffn) {
+            // Fused path: single kernel (RMSNorm + GateUp GEMM + SwiGLU + Down GEMM + Residual)
+            fused_ffn(logits_in, logits_in, idev == 0 ? logits_in : nullptr,
+                      rsrc.w_ffn_norm[layer], rsrc.w_ffn_gate_up[layer],
+                      rsrc.w_ffn_down[layer], meta.epsilon);
+        } else {
+            // Non-fused path: 4 separate ops
+            rmsnorm(logits_out, logits_in, rsrc.w_ffn_norm[layer], meta.epsilon);
+            linear(gate_up_buf, logits_out, rsrc.w_ffn_gate_up[layer], 1.0, 0.0, nullptr, nullptr);
+            swiglu(gate_buf, up_buf, gate_buf);
+            linear(logits_in, gate_buf, rsrc.w_ffn_down[layer], 1.0, 0.0, idev == 0 ? logits_in : nullptr, nullptr); // only rank 0 adds residual
+        }
+
+        RUN_INFINI(infinirtEventRecord(rsrc.ffn_end_event, stream));
+        RUN_INFINI(infinirtEventSynchronize(rsrc.ffn_end_event));
+        float layer_ffn_ms = 0;
+        RUN_INFINI(infinirtEventElapsedTime(&layer_ffn_ms, rsrc.ffn_start_event, rsrc.ffn_end_event));
+        rsrc.ffn_layer_times_ms.push_back(layer_ffn_ms);
+        rsrc.ffn_total_time_ms += layer_ffn_ms;
 
         // All_reduce if distributed
         if (rsrc.comm != nullptr) {
@@ -471,4 +505,24 @@ __INFINI_C void destroyJiugeModel(struct JiugeModel *model) {
     }
 
     delete model;
+}
+
+__INFINI_C void setJiugeFusedFFN(struct JiugeModel *model, int use_fused) {
+    for (auto &rsrc : model->dev_resources) {
+        rsrc.use_fused_ffn = (use_fused != 0);
+    }
+}
+
+__INFINI_C void getJiugeFFNProfile(struct JiugeModel *model,
+                                    float *total_ms,
+                                    float *per_layer_ms,
+                                    int *n_layers) {
+    auto &rsrc = model->dev_resources[0];
+    *total_ms = rsrc.ffn_total_time_ms;
+    *n_layers = static_cast<int>(rsrc.ffn_layer_times_ms.size());
+    if (per_layer_ms != nullptr) {
+        for (int i = 0; i < *n_layers; i++) {
+            per_layer_ms[i] = rsrc.ffn_layer_times_ms[i];
+        }
+    }
 }

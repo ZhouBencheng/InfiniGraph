@@ -33,10 +33,8 @@ infiniStatus_t Descriptor::create(
 
     size_t normalized_size = ntok * d * dtype_size;
     size_t gate_up_size = ntok * 2 * di * dtype_size;
-    size_t hidden_size = ntok * di * dtype_size;
-    size_t down_out_size = info.has_residual ? ntok * d * dtype_size : 0;
 
-    size_t workspace_size = normalized_size + gate_up_size + hidden_size + down_out_size;
+    size_t workspace_size = normalized_size + gate_up_size;
 
     *desc_ptr = new Descriptor(
         nullptr,
@@ -46,7 +44,7 @@ infiniStatus_t Descriptor::create(
     return INFINI_STATUS_SUCCESS;
 }
 
-template <typename Tdata, typename Tweight>
+template <typename Tdata, typename TnormWeight, typename TmatWeight>
 infiniStatus_t calculateTyped(
     const FusedFFNInfo &info,
     void *workspace, size_t workspace_size,
@@ -61,21 +59,17 @@ infiniStatus_t calculateTyped(
     size_t d = info.d();
     size_t di = info.di();
 
-    // Partition workspace
+    // Partition workspace (no separate hidden_buf needed, SwiGLU is in-place)
     char *ws_ptr = static_cast<char *>(workspace);
     Tdata *normalized_buf = reinterpret_cast<Tdata *>(ws_ptr);
     ws_ptr += ntok * d * sizeof(Tdata);
     Tdata *gate_up_buf = reinterpret_cast<Tdata *>(ws_ptr);
-    ws_ptr += ntok * 2 * di * sizeof(Tdata);
-    Tdata *hidden_buf = reinterpret_cast<Tdata *>(ws_ptr);
-    ws_ptr += ntok * di * sizeof(Tdata);
-    Tdata *down_out_buf = info.has_residual ? reinterpret_cast<Tdata *>(ws_ptr) : reinterpret_cast<Tdata *>(out);
 
     const Tdata *in_ptr = reinterpret_cast<const Tdata *>(in);
     const Tdata *residual_ptr = reinterpret_cast<const Tdata *>(residual);
-    const Tweight *norm_w_ptr = reinterpret_cast<const Tweight *>(norm_weight);
-    const Tweight *gate_up_w_ptr = reinterpret_cast<const Tweight *>(gate_up_weight);
-    const Tweight *down_w_ptr = reinterpret_cast<const Tweight *>(down_weight);
+    const TnormWeight *norm_w_ptr = reinterpret_cast<const TnormWeight *>(norm_weight);
+    const TmatWeight *gate_up_w_ptr = reinterpret_cast<const TmatWeight *>(gate_up_weight);
+    const TmatWeight *down_w_ptr = reinterpret_cast<const TmatWeight *>(down_weight);
     Tdata *out_ptr = reinterpret_cast<Tdata *>(out);
 
     // Stage 1: RMSNorm
@@ -113,44 +107,55 @@ infiniStatus_t calculateTyped(
         }
     }
 
-    // Stage 3: SwiGLU
+    // Stage 3: SwiGLU (in-place, overwrites gate half of gate_up_buf)
     for (size_t t = 0; t < ntok; t++) {
-        const Tdata *gate_up = gate_up_buf + t * 2 * di;
-        Tdata *hidden = hidden_buf + t * di;
+        Tdata *gate_up = gate_up_buf + t * 2 * di;
 
         for (size_t i = 0; i < di; i++) {
             float gate = utils::cast<float>(gate_up[i]);
             float up = utils::cast<float>(gate_up[di + i]);
             // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
             float silu = gate / (1.0f + std::exp(-gate));
-            hidden[i] = utils::cast<Tdata>(silu * up);
+            gate_up[i] = utils::cast<Tdata>(silu * up);
         }
     }
 
-    // Stage 4: Down GEMM (C = A @ B^T)
-    // hidden: [ntok, di], down_weight: [d, di] -> down_out: [ntok, d]
-    for (size_t t = 0; t < ntok; t++) {
-        const Tdata *hidden = hidden_buf + t * di;
-        Tdata *down_out = down_out_buf + t * d;
-
-        for (size_t j = 0; j < d; j++) {
-            float sum = 0.0f;
-            for (size_t k = 0; k < di; k++) {
-                sum += utils::cast<float>(hidden[k]) * utils::cast<float>(down_w_ptr[j * di + k]);
-            }
-            down_out[j] = utils::cast<Tdata>(sum);
-        }
-    }
-
-    // Stage 5: Residual Add (if residual is provided)
-    if (info.has_residual) {
+    // Stage 4: Down GEMM (C = A @ B^T) + Residual Add (fused)
+    // Read from gate_up_buf (stride 2*di) to match non-fused path's buffer layout
+    {
+        bool fuse_residual = info.has_residual && (out_ptr == residual_ptr);
         for (size_t t = 0; t < ntok; t++) {
-            const Tdata *down_out = down_out_buf + t * d;
-            const Tdata *res = residual_ptr + t * info.residual_stride;
+            const Tdata *hidden = gate_up_buf + t * 2 * di;  // stride = 2*di to match non-fused
             Tdata *o = out_ptr + t * info.out_stride;
 
+            if (fuse_residual) {
+                const Tdata *res = residual_ptr + t * info.residual_stride;
+                for (size_t j = 0; j < d; j++) {
+                    float sum = utils::cast<float>(res[j]);
+                    for (size_t k = 0; k < di; k++) {
+                        sum += utils::cast<float>(hidden[k]) * utils::cast<float>(down_w_ptr[j * di + k]);
+                    }
+                    o[j] = utils::cast<Tdata>(sum);
+                }
+            } else {
+                for (size_t j = 0; j < d; j++) {
+                    float sum = 0.0f;
+                    for (size_t k = 0; k < di; k++) {
+                        sum += utils::cast<float>(hidden[k]) * utils::cast<float>(down_w_ptr[j * di + k]);
+                    }
+                    o[j] = utils::cast<Tdata>(sum);
+                }
+            }
+        }
+    }
+
+    // Stage 5: Residual Add (only when not fused into GEMM)
+    if (info.has_residual && out_ptr != residual_ptr) {
+        for (size_t t = 0; t < ntok; t++) {
+            Tdata *o = out_ptr + t * info.out_stride;
+            const Tdata *res = residual_ptr + t * info.residual_stride;
             for (size_t i = 0; i < d; i++) {
-                float val = utils::cast<float>(down_out[i]) + utils::cast<float>(res[i]);
+                float val = utils::cast<float>(o[i]) + utils::cast<float>(res[i]);
                 o[i] = utils::cast<Tdata>(val);
             }
         }
@@ -173,21 +178,29 @@ infiniStatus_t Descriptor::calculate(
         return INFINI_STATUS_INSUFFICIENT_WORKSPACE;
     }
 
-    // Dispatch based on dtype and wtype
+    // Dispatch based on dtype, wtype (norm weight), and mtype (matrix weight)
     if (_info.dtype == INFINI_DTYPE_F16) {
-        if (_info.wtype == INFINI_DTYPE_F16) {
-            return calculateTyped<fp16_t, fp16_t>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
-        } else if (_info.wtype == INFINI_DTYPE_F32) {
-            return calculateTyped<fp16_t, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        if (_info.wtype == INFINI_DTYPE_F16 && _info.mtype == INFINI_DTYPE_F16) {
+            return calculateTyped<fp16_t, fp16_t, fp16_t>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        } else if (_info.wtype == INFINI_DTYPE_F32 && _info.mtype == INFINI_DTYPE_F16) {
+            return calculateTyped<fp16_t, float, fp16_t>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        } else if (_info.wtype == INFINI_DTYPE_F16 && _info.mtype == INFINI_DTYPE_F32) {
+            return calculateTyped<fp16_t, fp16_t, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        } else if (_info.wtype == INFINI_DTYPE_F32 && _info.mtype == INFINI_DTYPE_F32) {
+            return calculateTyped<fp16_t, float, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
         }
     } else if (_info.dtype == INFINI_DTYPE_BF16) {
-        if (_info.wtype == INFINI_DTYPE_BF16) {
-            return calculateTyped<bf16_t, bf16_t>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
-        } else if (_info.wtype == INFINI_DTYPE_F32) {
-            return calculateTyped<bf16_t, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        if (_info.wtype == INFINI_DTYPE_BF16 && _info.mtype == INFINI_DTYPE_BF16) {
+            return calculateTyped<bf16_t, bf16_t, bf16_t>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        } else if (_info.wtype == INFINI_DTYPE_F32 && _info.mtype == INFINI_DTYPE_BF16) {
+            return calculateTyped<bf16_t, float, bf16_t>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        } else if (_info.wtype == INFINI_DTYPE_BF16 && _info.mtype == INFINI_DTYPE_F32) {
+            return calculateTyped<bf16_t, bf16_t, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        } else if (_info.wtype == INFINI_DTYPE_F32 && _info.mtype == INFINI_DTYPE_F32) {
+            return calculateTyped<bf16_t, float, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
         }
     } else if (_info.dtype == INFINI_DTYPE_F32) {
-        return calculateTyped<float, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
+        return calculateTyped<float, float, float>(_info, workspace, workspace_size, out, in, residual, norm_weight, gate_up_weight, down_weight);
     }
 
     return INFINI_STATUS_BAD_TENSOR_DTYPE;
