@@ -37,29 +37,114 @@ from infer_task import InferTask, KVCache
 
 # ── Test Scenarios ──────────────────────────────────────────────────
 
+# NOTE: KV caches are sized to input_tokens + output_tokens per scenario to
+# avoid allocating for the full max_position_embeddings (65536), which would
+# exhaust GPU memory at large batch sizes.
 TEST_CASES = [
+    # ── Single-batch decode (baseline) ──────────────────────────────
     {
         "label": "Decode (bs=1, seq=1)",
         "batch_size": 1,
         "input_tokens": 1,
         "output_tokens": 32,
     },
+    # ── Batched decode (many KV caches, pool still small) ───────────
     {
-        "label": "Short Prefill (bs=1, seq=64)",
+        "label": "Batched Decode (bs=4, seq=1)",
+        "batch_size": 4,
+        "input_tokens": 1,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Batched Decode (bs=8, seq=1)",
+        "batch_size": 8,
+        "input_tokens": 1,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Batched Decode (bs=16, seq=1)",
+        "batch_size": 16,
+        "input_tokens": 1,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Batched Decode (bs=32, seq=1)",
+        "batch_size": 32,
+        "input_tokens": 1,
+        "output_tokens": 32,
+    },
+    # ── Batched prefill (KV caches + moderate pool growth) ──────────
+    {
+        "label": "Batched Prefill (bs=2, seq=256)",
+        "batch_size": 2,
+        "input_tokens": 256,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Batched Prefill (bs=4, seq=256)",
+        "batch_size": 4,
+        "input_tokens": 256,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Batched Prefill (bs=4, seq=512)",
+        "batch_size": 4,
+        "input_tokens": 512,
+        "output_tokens": 1,
+    },
+    {
+        "label": "Batched Prefill (bs=8, seq=512)",
+        "batch_size": 8,
+        "input_tokens": 512,
+        "output_tokens": 1,
+    },
+    # ── Single-batch prefill: small → large ─────────────────────────
+    {
+        "label": "Prefill (bs=1, seq=32)",
+        "batch_size": 1,
+        "input_tokens": 32,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Prefill (bs=1, seq=64)",
         "batch_size": 1,
         "input_tokens": 64,
         "output_tokens": 32,
     },
     {
-        "label": "Medium Prefill (bs=1, seq=512)",
+        "label": "Prefill (bs=1, seq=128)",
+        "batch_size": 1,
+        "input_tokens": 128,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Prefill (bs=1, seq=256)",
+        "batch_size": 1,
+        "input_tokens": 256,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Prefill (bs=1, seq=512)",
         "batch_size": 1,
         "input_tokens": 512,
         "output_tokens": 32,
     },
     {
-        "label": "Long Prefill (bs=1, seq=1024)",
+        "label": "Prefill (bs=1, seq=1024)",
         "batch_size": 1,
         "input_tokens": 1024,
+        "output_tokens": 32,
+    },
+    {
+        "label": "Prefill (bs=1, seq=2048)",
+        "batch_size": 1,
+        "input_tokens": 2048,
+        "output_tokens": 1,
+    },
+    {
+        "label": "Prefill (bs=1, seq=4096)",
+        "batch_size": 1,
+        "input_tokens": 4096,
         "output_tokens": 1,
     },
 ]
@@ -76,7 +161,7 @@ def make_dummy_tokens(n_tokens: int, vocab_size: int) -> List[int]:
 
 
 def run_inference(model: JiugeForCauslLM, tokens_list: List[List[int]],
-                  use_fused: bool) -> dict:
+                  use_fused: bool, kv_max_len: int = None) -> dict:
     """
     Run a single inference round with the given tokens.
     Returns timing info and FFN profile data.
@@ -88,7 +173,7 @@ def run_inference(model: JiugeForCauslLM, tokens_list: List[List[int]],
     for i, tokens in enumerate(tokens_list):
         task = InferTask(0, tokens, model.max_context_len(),
                          1.0, 1, 1.0, model.eos_token_id)
-        kv = KVCache(model)
+        kv = KVCache(model, max_len=kv_max_len)
         task.bind_kvcache(kv)
         tasks.append(task)
         kv_caches.append(kv)
@@ -114,7 +199,7 @@ def run_inference(model: JiugeForCauslLM, tokens_list: List[List[int]],
 
 
 def run_forward(model: JiugeForCauslLM, tokens_list: List[List[int]],
-                use_fused: bool) -> torch.Tensor:
+                use_fused: bool, kv_max_len: int = None) -> torch.Tensor:
     """Run forward pass and return logits for correctness check."""
     model.jiuge_model.set_fused_ffn(model.model_instance, use_fused)
 
@@ -123,7 +208,7 @@ def run_forward(model: JiugeForCauslLM, tokens_list: List[List[int]],
     for tokens in tokens_list:
         task = InferTask(0, tokens, model.max_context_len(),
                          1.0, 1, 1.0, model.eos_token_id)
-        kv = KVCache(model)
+        kv = KVCache(model, max_len=kv_max_len)
         task.bind_kvcache(kv)
         tasks.append(task)
         kv_caches.append(kv)
@@ -156,12 +241,13 @@ def verify_correctness(model: JiugeForCauslLM, vocab_size: int):
     print("=" * 60)
 
     tokens = make_dummy_tokens(16, vocab_size)
+    kv_len = len(tokens) + 1  # input + 1 output position
 
     print("Running non-fused forward pass...")
-    logits_non_fused = run_forward(model, [tokens], use_fused=False)
+    logits_non_fused = run_forward(model, [tokens], use_fused=False, kv_max_len=kv_len)
 
     print("Running fused forward pass...")
-    logits_fused = run_forward(model, [tokens], use_fused=True)
+    logits_fused = run_forward(model, [tokens], use_fused=True, kv_max_len=kv_len)
 
     logits_nf = logits_non_fused.float().numpy()
     logits_f = logits_fused.float().numpy()
@@ -202,16 +288,18 @@ def benchmark_scenario(model: JiugeForCauslLM, case: dict, vocab_size: int):
     results = {"non_fused": {"e2e": [], "ffn_total": [], "ffn_per_layer": []},
                "fused": {"e2e": [], "ffn_total": [], "ffn_per_layer": []}}
 
+    kv_max_len = n_input + n_output
+
     for mode_name, use_fused in [("non_fused", False), ("fused", True)]:
         # Warmup
         for _ in range(WARMUP_ROUNDS):
             tokens_list = [make_dummy_tokens(n_input, vocab_size) for _ in range(bs)]
-            run_inference(model, tokens_list, use_fused)
+            run_inference(model, tokens_list, use_fused, kv_max_len=kv_max_len)
 
         # Measured rounds
         for _ in range(MEASURED_ROUNDS):
             tokens_list = [make_dummy_tokens(n_input, vocab_size) for _ in range(bs)]
-            result = run_inference(model, tokens_list, use_fused)
+            result = run_inference(model, tokens_list, use_fused, kv_max_len=kv_max_len)
             results[mode_name]["e2e"].append(result["e2e_ms"])
             results[mode_name]["ffn_total"].append(result["ffn_total_ms"])
             results[mode_name]["ffn_per_layer"].append(result["ffn_per_layer_ms"])

@@ -579,10 +579,10 @@ class JiugeForCauslLM:
     def max_context_len(self):
         return self.meta.dctx
 
-    def create_kv_cache(self):
+    def create_kv_cache(self, max_len=None):
         return self.jiuge_model.create_kv_cache(
             self.meta.nlayer,
-            self.meta.dctx,
+            max_len if max_len is not None else self.meta.dctx,
             self.meta.nkvh,
             self.meta.dh,
             self.meta.dh,
