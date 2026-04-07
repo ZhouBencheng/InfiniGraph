@@ -44,6 +44,7 @@
 #define hcEventSynchronize mcEventSynchronize
 #define hcEventDestroy mcEventDestroy
 #define hcEventElapsedTime mcEventElapsedTime
+#define hcMemGetInfo mcMemGetInfo
 #define hcMalloc mcMalloc
 #define hpccDataType macaDataType
 #define hcblasComputeType_t mcblasComputeType_t
