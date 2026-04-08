@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chunk_prefill_compiler.hpp"
 #include "paged_compiler.hpp"
 #include "static_batching_compiler.hpp"
 
@@ -15,5 +16,6 @@ public:
 private:
     std::unique_ptr<StaticBatchingCompiler> static_batching_compiler_;
     std::unique_ptr<PagedCompiler> paged_compiler_;
+    std::unique_ptr<ChunkPrefillCompiler> chunk_prefill_compiler_;
 };
 } // namespace infinilm::engine

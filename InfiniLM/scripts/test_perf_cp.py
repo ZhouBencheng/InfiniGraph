@@ -48,7 +48,7 @@ async def measure_one_round(client, round_idx, delay_sec):
     2. After delay_sec, fire a short request
     3. Return both TTFT and E2E for both requests
     """
-    long_prompt = build_long_prompt(round_idx, target_chars=1500)
+    long_prompt = build_long_prompt(round_idx, target_chars=9000)
     short_prompt = f"(编号{round_idx}) 1+1等于几？"
 
     long_result = {}
