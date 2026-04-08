@@ -2,6 +2,7 @@
 
 #include "../../models/infinilm_model.hpp"
 #include "../rank_barrier.hpp"
+#include "infinicore/graph/graph.hpp"
 
 namespace infinilm::engine {
 

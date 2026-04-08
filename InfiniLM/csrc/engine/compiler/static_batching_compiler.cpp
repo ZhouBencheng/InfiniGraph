@@ -1,6 +1,7 @@
 #include "static_batching_compiler.hpp"
 
 #include "../../cache/cache.hpp"
+#include "infinicore/context/context.hpp"
 
 namespace infinilm::engine {
 StaticBatchingCompiler::StaticBatchingCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier)

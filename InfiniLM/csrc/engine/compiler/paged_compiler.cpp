@@ -1,4 +1,5 @@
 #include "paged_compiler.hpp"
+#include "infinicore/context/context.hpp"
 
 namespace {
 // Todo: replace with Tensor::zeros when it is available
