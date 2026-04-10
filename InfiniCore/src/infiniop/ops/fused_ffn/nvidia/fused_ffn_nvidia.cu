@@ -1,15 +1,101 @@
 #include "../../../devices/nvidia/nvidia_common.cuh"
 #include "fused_ffn_nvidia.cuh"
 
-#include "../../../devices/nvidia/nvidia_kernel_common.cuh"
-#include <cublas_v2.h>
+// Each op's public header re-defines a DESCRIPTOR(NAMESPACE) macro without
+// guarding it, so including multiple sub-op headers in this TU clashes.
+// We #undef between includes to sidestep the collision; order is arbitrary.
+#undef DESCRIPTOR
+#include "../../gemm/nvidia/gemm_nvidia.cuh"
+#undef DESCRIPTOR
+#include "../../rms_norm/nvidia/rms_norm_nvidia.cuh"
 
-#include "kernel.cuh"
+// swiglu / add use a separate ELEMENTWISE_DESCRIPTOR macro so they do not
+// clash with the DESCRIPTOR macro above.
+#include "../../add/nvidia/add_nvidia.cuh"
+#include "../../swiglu/nvidia/swiglu_nvidia.cuh"
+
+#include <algorithm>
+#include <memory>
+#include <vector>
 
 namespace op::fused_ffn::nvidia {
 
+namespace {
+
+// 256-byte alignment is safe for both cublas working buffers and elementwise
+// meta blobs; higher would waste workspace on small shapes.
+constexpr size_t kWsAlign = 256;
+
+inline size_t alignUp(size_t x, size_t a) {
+    return (x + a - 1) & ~(a - 1);
+}
+
+// Heap-allocate a 2-D tensor descriptor with explicit element strides.
+// Returned pointer must be deleted by the caller.
+inline infiniopTensorDescriptor_t make2D(infiniDtype_t dtype,
+                                         size_t d0, size_t d1,
+                                         ptrdiff_t s0, ptrdiff_t s1) {
+    const size_t shape[2] = {d0, d1};
+    const ptrdiff_t strides[2] = {s0, s1};
+    return new InfiniopTensorDescriptor(dtype, 2, shape, strides);
+}
+
+// Synthesize a GEMM B-matrix view with logical shape [k, n] regardless of
+// whether the original weight was stored as [n, k] (Layout A) or [k, n]
+// (Layout B). FusedFFNInfo::create already guarantees one of the two strides
+// is 1, so this only needs to decide which dim is which and swap accordingly.
+inline infiniopTensorDescriptor_t makeWeightAsKN(infiniDtype_t dtype,
+                                                 size_t k, size_t n,
+                                                 infiniopTensorDescriptor_t orig) {
+    const size_t d0 = orig->dim(0);
+    const ptrdiff_t s0 = orig->stride(0);
+    const ptrdiff_t s1 = orig->stride(1);
+    if (d0 == n) {
+        // original [n, k] -> view as [k, n] by swapping axes
+        return make2D(dtype, k, n, s1, s0);
+    }
+    // original already [k, n]
+    return make2D(dtype, k, n, s0, s1);
+}
+
+// RAII wrapper: owns a list of synthesized tensor descriptors and deletes
+// them on scope exit. Sub-descriptor create() calls copy out what they need,
+// so the temporaries only need to outlive the create() call.
+class DescScope {
+    std::vector<infiniopTensorDescriptor_t> _owned;
+
+public:
+    ~DescScope() {
+        for (auto *t : _owned) {
+            delete t;
+        }
+    }
+    infiniopTensorDescriptor_t adopt(infiniopTensorDescriptor_t t) {
+        _owned.push_back(t);
+        return t;
+    }
+};
+
+} // namespace
+
 struct Descriptor::Opaque {
     std::shared_ptr<device::nvidia::Handle::Internal> internal;
+
+    // Workspace slab sizes (bytes), padded to kWsAlign.
+    size_t normalized_bytes = 0;
+    size_t gate_up_bytes    = 0;
+    size_t hidden_bytes     = 0;
+    size_t inner_ws_bytes   = 0; // max of sub-descriptor workspaceSize()
+
+    bool has_residual = false;
+
+    // Sub-descriptors owned by this fused op; each one is a standard
+    // InfiniopDescriptor for the corresponding standalone operator.
+    std::unique_ptr<op::rms_norm::nvidia::Descriptor> rms_norm;
+    std::unique_ptr<op::gemm::nvidia::Descriptor>     gate_up_gemm;
+    std::unique_ptr<op::swiglu::nvidia::Descriptor>   swiglu;
+    std::unique_ptr<op::gemm::nvidia::Descriptor>     down_gemm;
+    std::unique_ptr<op::add::nvidia::Descriptor>      residual_add;
 };
 
 Descriptor::~Descriptor() {
@@ -17,7 +103,7 @@ Descriptor::~Descriptor() {
 }
 
 infiniStatus_t Descriptor::create(
-    infiniopHandle_t handle,
+    infiniopHandle_t handle_,
     Descriptor **desc_ptr,
     infiniopTensorDescriptor_t out_desc,
     infiniopTensorDescriptor_t in_desc,
@@ -27,201 +113,142 @@ infiniStatus_t Descriptor::create(
     infiniopTensorDescriptor_t down_weight_desc,
     float epsilon) {
 
-    auto result = FusedFFNInfo::create(
+    auto info_result = FusedFFNInfo::create(
         out_desc, in_desc, residual_desc,
         norm_weight_desc, gate_up_weight_desc, down_weight_desc, epsilon);
-    CHECK_RESULT(result);
-    auto info = result.take();
+    CHECK_RESULT(info_result);
+    auto info = info_result.take();
 
-    // Workspace size:
-    // - normalized_buf: ntok * d * sizeof(dtype)  (for RMSNorm output -> GEMM input)
-    // - gate_up_buf: ntok * 2*di * sizeof(dtype)  (for GateUp GEMM output)
-    // - hidden_buf: ntok * di * sizeof(dtype)     (for SwiGLU output -> Down GEMM input)
-    // - down_out_buf: ntok * d * sizeof(dtype)    (for Down GEMM output, if residual exists)
-    size_t dtype_size = infiniSizeOf(info.dtype);
-    size_t ntok = info.ntok();
-    size_t d = info.d();
-    size_t di = info.di();
+    auto handle = reinterpret_cast<device::nvidia::Handle *>(handle_);
 
-    size_t normalized_size = ntok * d * dtype_size;
-    size_t gate_up_size = ntok * 2 * di * dtype_size;
+    auto opaque = std::make_unique<Opaque>();
+    opaque->internal     = handle->internal();
+    opaque->has_residual = info.has_residual;
 
-    // Total workspace (SwiGLU is in-place, no separate hidden_buf needed)
-    size_t workspace_size = normalized_size + gate_up_size;
+    const size_t ntok = info.ntok();
+    const size_t d    = info.d();
+    const size_t di   = info.di();
+    const size_t dtype_sz = infiniSizeOf(info.dtype);
+
+    // ── Workspace layout ──
+    //   normalized : [ntok, d]     contiguous   -> RMSNorm out,   GateUp in
+    //   gate_up    : [ntok, 2*di]  contiguous   -> GateUp out,    SwiGLU in
+    //   hidden     : [ntok, di]    contiguous   -> SwiGLU out,    Down  in
+    //   inner_ws   : max(sub->workspaceSize())  shared by sub-descriptors
+    //
+    // The compact hidden slab (stride=di instead of stride=2*di) gives the
+    // Down-GEMM a tightly packed K dimension, which matters on BIV150 where
+    // cuBLAS 10.2 tensor-core paths prefer aligned contiguous leading dims.
+    opaque->normalized_bytes = alignUp(ntok * d      * dtype_sz, kWsAlign);
+    opaque->gate_up_bytes    = alignUp(ntok * 2 * di * dtype_sz, kWsAlign);
+    opaque->hidden_bytes     = alignUp(ntok * di     * dtype_sz, kWsAlign);
+
+    DescScope scope;
+
+    // ── RMSNorm sub-descriptor ──
+    // Activation is 2-D [ntok, d]; weight is 1-D [d].
+    auto normalized_desc = scope.adopt(
+        make2D(info.dtype, ntok, d, static_cast<ptrdiff_t>(d), 1));
+    auto in_view = scope.adopt(
+        make2D(info.dtype, ntok, d, info.in_stride, 1));
+
+    {
+        op::rms_norm::nvidia::Descriptor *sub = nullptr;
+        CHECK_STATUS(op::rms_norm::nvidia::Descriptor::create(
+            handle_, &sub,
+            normalized_desc, in_view, norm_weight_desc,
+            info.epsilon));
+        opaque->rms_norm.reset(sub);
+        opaque->inner_ws_bytes =
+            std::max(opaque->inner_ws_bytes, sub->workspaceSize());
+    }
+
+    // ── GateUp GEMM sub-descriptor ──
+    //   [ntok, 2*di] = [ntok, d] @ [d, 2*di]
+    auto gate_up_c_desc = scope.adopt(
+        make2D(info.dtype, ntok, 2 * di, static_cast<ptrdiff_t>(2 * di), 1));
+    auto gate_up_b_desc = scope.adopt(
+        makeWeightAsKN(info.mtype, d, 2 * di, gate_up_weight_desc));
+
+    {
+        op::gemm::nvidia::Descriptor *sub = nullptr;
+        CHECK_STATUS(op::gemm::nvidia::Descriptor::create(
+            handle_, &sub, gate_up_c_desc, normalized_desc, gate_up_b_desc));
+        opaque->gate_up_gemm.reset(sub);
+        opaque->inner_ws_bytes =
+            std::max(opaque->inner_ws_bytes, sub->workspaceSize());
+    }
+
+    // ── SwiGLU sub-descriptor ──
+    // Operates on the interleaved [gate | up] buffer:
+    //   logical inputs : up   [ntok, di] row stride 2*di
+    //                    gate [ntok, di] row stride 2*di
+    //   logical output : hidden [ntok, di] contiguous
+    // gate and up share identical shape/strides — only their base pointers
+    // differ at calculate time.
+    auto hidden_desc = scope.adopt(
+        make2D(info.dtype, ntok, di, static_cast<ptrdiff_t>(di), 1));
+    auto half_desc = scope.adopt(
+        make2D(info.dtype, ntok, di, static_cast<ptrdiff_t>(2 * di), 1));
+
+    {
+        op::swiglu::nvidia::Descriptor *sub = nullptr;
+        CHECK_STATUS(op::swiglu::nvidia::Descriptor::create(
+            handle_, &sub, hidden_desc, {half_desc, half_desc}));
+        opaque->swiglu.reset(sub);
+        opaque->inner_ws_bytes =
+            std::max(opaque->inner_ws_bytes, sub->workspaceSize());
+    }
+
+    // ── Down GEMM sub-descriptor ──
+    //   out = [beta * out] + 1.0 * hidden @ down_weight
+    // The output matrix uses the user's out stride so the gemm writes
+    // directly into the caller's tensor.
+    auto out_view = scope.adopt(
+        make2D(info.dtype, ntok, d, info.out_stride, 1));
+    auto down_b_desc = scope.adopt(
+        makeWeightAsKN(info.mtype, di, d, down_weight_desc));
+
+    {
+        op::gemm::nvidia::Descriptor *sub = nullptr;
+        CHECK_STATUS(op::gemm::nvidia::Descriptor::create(
+            handle_, &sub, out_view, hidden_desc, down_b_desc));
+        opaque->down_gemm.reset(sub);
+        opaque->inner_ws_bytes =
+            std::max(opaque->inner_ws_bytes, sub->workspaceSize());
+    }
+
+    // ── Residual add sub-descriptor (optional) ──
+    // Only used when residual is a distinct tensor from out; the
+    // (out == residual) case is fused into the Down-GEMM via beta=1 at
+    // calculate time.
+    if (info.has_residual) {
+        auto residual_view = scope.adopt(
+            make2D(info.dtype, ntok, d, info.residual_stride, 1));
+        auto out_view_for_add = scope.adopt(
+            make2D(info.dtype, ntok, d, info.out_stride, 1));
+
+        op::add::nvidia::Descriptor *sub = nullptr;
+        CHECK_STATUS(op::add::nvidia::Descriptor::create(
+            handle_, &sub,
+            out_view_for_add, {out_view_for_add, residual_view}));
+        opaque->residual_add.reset(sub);
+        opaque->inner_ws_bytes =
+            std::max(opaque->inner_ws_bytes, sub->workspaceSize());
+    }
+
+    const size_t workspace_size =
+        opaque->normalized_bytes +
+        opaque->gate_up_bytes +
+        opaque->hidden_bytes +
+        alignUp(opaque->inner_ws_bytes, kWsAlign);
 
     *desc_ptr = new Descriptor(
-        new Opaque{reinterpret_cast<device::nvidia::Handle *>(handle)->internal()},
+        opaque.release(),
         std::move(info),
         workspace_size,
         handle->device, handle->device_id);
     return INFINI_STATUS_SUCCESS;
-}
-
-// Launch RMSNorm kernel with different data types
-template <unsigned int BLOCK_SIZE>
-infiniStatus_t launchRmsnormKernel(
-    size_t ntok, size_t dim,
-    void *normalized, const void *x, const void *w,
-    infiniDtype_t dtype, infiniDtype_t wtype,
-    float epsilon,
-    ptrdiff_t in_stride, ptrdiff_t out_stride,
-    cudaStream_t cuda_stream) {
-
-#define LAUNCH_KERNEL(Tdata, Tweight, Tcompute)                                        \
-    rmsnormKernel<BLOCK_SIZE, Tcompute, Tdata, Tweight>                                \
-        <<<ntok, BLOCK_SIZE, 0, cuda_stream>>>(                                        \
-            reinterpret_cast<Tdata *>(normalized),                                     \
-            reinterpret_cast<const Tdata *>(x),                                        \
-            reinterpret_cast<const Tweight *>(w),                                      \
-            ntok, dim, epsilon, in_stride, out_stride)
-
-    if (dtype == INFINI_DTYPE_F16 && wtype == INFINI_DTYPE_F16) {
-        LAUNCH_KERNEL(half, half, float);
-    } else if (dtype == INFINI_DTYPE_F16 && wtype == INFINI_DTYPE_BF16) {
-        LAUNCH_KERNEL(half, __nv_bfloat16, float);
-    } else if (dtype == INFINI_DTYPE_F16 && wtype == INFINI_DTYPE_F32) {
-        LAUNCH_KERNEL(half, float, float);
-    } else if (dtype == INFINI_DTYPE_BF16 && wtype == INFINI_DTYPE_BF16) {
-        LAUNCH_KERNEL(__nv_bfloat16, __nv_bfloat16, float);
-    } else if (dtype == INFINI_DTYPE_BF16 && wtype == INFINI_DTYPE_F16) {
-        LAUNCH_KERNEL(__nv_bfloat16, half, float);
-    } else if (dtype == INFINI_DTYPE_BF16 && wtype == INFINI_DTYPE_F32) {
-        LAUNCH_KERNEL(__nv_bfloat16, float, float);
-    } else if (dtype == INFINI_DTYPE_F32 && wtype == INFINI_DTYPE_F32) {
-        LAUNCH_KERNEL(float, float, float);
-    } else {
-        return INFINI_STATUS_BAD_TENSOR_DTYPE;
-    }
-
-#undef LAUNCH_KERNEL
-
-    return INFINI_STATUS_SUCCESS;
-}
-
-// Launch SwiGLU kernel with different data types (in-place)
-template <unsigned int BLOCK_SIZE>
-infiniStatus_t launchSwigluKernel(
-    size_t ntok, size_t intermediate_dim,
-    void *gate_up,
-    infiniDtype_t dtype,
-    ptrdiff_t stride,
-    cudaStream_t cuda_stream) {
-
-#define LAUNCH_KERNEL(Tdata, Tcompute)                                                 \
-    swigluKernel<BLOCK_SIZE, Tcompute, Tdata>                                          \
-        <<<ntok, BLOCK_SIZE, 0, cuda_stream>>>(                                        \
-            reinterpret_cast<Tdata *>(gate_up),                                        \
-            ntok, intermediate_dim, stride)
-
-    if (dtype == INFINI_DTYPE_F16) {
-        LAUNCH_KERNEL(half, float);
-    } else if (dtype == INFINI_DTYPE_BF16) {
-        LAUNCH_KERNEL(__nv_bfloat16, float);
-    } else if (dtype == INFINI_DTYPE_F32) {
-        LAUNCH_KERNEL(float, float);
-    } else {
-        return INFINI_STATUS_BAD_TENSOR_DTYPE;
-    }
-
-#undef LAUNCH_KERNEL
-
-    return INFINI_STATUS_SUCCESS;
-}
-
-// Launch Residual Add kernel with different data types
-template <unsigned int BLOCK_SIZE>
-infiniStatus_t launchResidualAddKernel(
-    size_t ntok, size_t dim,
-    void *out, const void *gemm_out, const void *residual,
-    infiniDtype_t dtype,
-    ptrdiff_t out_stride, ptrdiff_t residual_stride,
-    cudaStream_t cuda_stream) {
-
-#define LAUNCH_KERNEL(Tdata, Tcompute)                                                 \
-    residualAddKernel<BLOCK_SIZE, Tcompute, Tdata>                                     \
-        <<<ntok, BLOCK_SIZE, 0, cuda_stream>>>(                                        \
-            reinterpret_cast<Tdata *>(out),                                            \
-            reinterpret_cast<const Tdata *>(gemm_out),                                 \
-            reinterpret_cast<const Tdata *>(residual),                                 \
-            ntok, dim, out_stride, residual_stride)
-
-    if (dtype == INFINI_DTYPE_F16) {
-        LAUNCH_KERNEL(half, float);
-    } else if (dtype == INFINI_DTYPE_BF16) {
-        LAUNCH_KERNEL(__nv_bfloat16, float);
-    } else if (dtype == INFINI_DTYPE_F32) {
-        LAUNCH_KERNEL(float, float);
-    } else {
-        return INFINI_STATUS_BAD_TENSOR_DTYPE;
-    }
-
-#undef LAUNCH_KERNEL
-
-    return INFINI_STATUS_SUCCESS;
-}
-
-// Helper function to get cuBLAS types for activation and weight matrices
-static void getCublasTypes(infiniDtype_t dtype, infiniDtype_t wtype,
-                          cudaDataType &a_type, cudaDataType &b_type, cudaDataType &c_type,
-#if defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
-                          cudaDataType &compute_type
-#else
-                          cublasComputeType_t &compute_type
-#endif
-) {
-    // Set a_type and c_type based on activation dtype
-    switch (dtype) {
-    case INFINI_DTYPE_F16:
-        a_type = CUDA_R_16F;
-        c_type = CUDA_R_16F;
-        break;
-    case INFINI_DTYPE_BF16:
-        a_type = CUDA_R_16BF;
-        c_type = CUDA_R_16BF;
-        break;
-    case INFINI_DTYPE_F32:
-        a_type = CUDA_R_32F;
-        c_type = CUDA_R_32F;
-        break;
-    default:
-        break;
-    }
-
-    // Set b_type based on weight wtype
-    switch (wtype) {
-    case INFINI_DTYPE_F16:
-        b_type = CUDA_R_16F;
-        break;
-    case INFINI_DTYPE_BF16:
-        b_type = CUDA_R_16BF;
-        break;
-    case INFINI_DTYPE_F32:
-        b_type = CUDA_R_32F;
-        break;
-    default:
-        break;
-    }
-
-    // Set compute type based on activation dtype
-    switch (dtype) {
-    case INFINI_DTYPE_F16:
-    case INFINI_DTYPE_BF16:
-#if defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
-        compute_type = CUDA_R_32F;
-#else
-        compute_type = CUBLAS_COMPUTE_32F;
-#endif
-        break;
-    case INFINI_DTYPE_F32:
-#if defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
-        compute_type = CUDA_R_32F;
-#else
-        compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
-#endif
-        break;
-    default:
-        break;
-    }
 }
 
 infiniStatus_t Descriptor::calculate(
@@ -238,156 +265,62 @@ infiniStatus_t Descriptor::calculate(
         return INFINI_STATUS_INSUFFICIENT_WORKSPACE;
     }
 
-    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
-    size_t ntok = _info.ntok();
-    size_t d = _info.d();
-    size_t di = _info.di();
-    size_t dtype_size = infiniSizeOf(_info.dtype);
+    const size_t di       = _info.di();
+    const size_t dtype_sz = infiniSizeOf(_info.dtype);
 
-    // Partition workspace
-    char *ws_ptr = static_cast<char *>(workspace);
-    void *normalized_buf = ws_ptr;
-    ws_ptr += ntok * d * dtype_size;
-    void *gate_up_buf = ws_ptr;
+    // Partition the workspace into the three persistent slabs plus an
+    // inner scratch buffer shared by all sub-descriptors.
+    char *ws = static_cast<char *>(workspace);
+    void *normalized_buf = ws; ws += _opaque->normalized_bytes;
+    void *gate_up_buf    = ws; ws += _opaque->gate_up_bytes;
+    void *hidden_buf     = ws; ws += _opaque->hidden_bytes;
+    void *inner_ws       = ws;
+    const size_t inner_ws_size = _opaque->inner_ws_bytes;
 
-    // Stage 1: RMSNorm (use same block size selection as standalone RMSNorm op)
-    {
-        unsigned int max_threads = _opaque->internal->maxThreadsPerBlock();
-        if (max_threads >= CUDA_BLOCK_SIZE_4096) {
-            CHECK_STATUS(launchRmsnormKernel<CUDA_BLOCK_SIZE_4096>(
-                ntok, d, normalized_buf, in, norm_weight,
-                _info.dtype, _info.wtype, _info.epsilon,
-                _info.in_stride, d, cuda_stream));
-        } else if (max_threads >= CUDA_BLOCK_SIZE_2048) {
-            CHECK_STATUS(launchRmsnormKernel<CUDA_BLOCK_SIZE_2048>(
-                ntok, d, normalized_buf, in, norm_weight,
-                _info.dtype, _info.wtype, _info.epsilon,
-                _info.in_stride, d, cuda_stream));
-        } else if (max_threads >= CUDA_BLOCK_SIZE_1024) {
-            CHECK_STATUS(launchRmsnormKernel<CUDA_BLOCK_SIZE_1024>(
-                ntok, d, normalized_buf, in, norm_weight,
-                _info.dtype, _info.wtype, _info.epsilon,
-                _info.in_stride, d, cuda_stream));
-        } else {
-            CHECK_STATUS(launchRmsnormKernel<CUDA_BLOCK_SIZE_512>(
-                ntok, d, normalized_buf, in, norm_weight,
-                _info.dtype, _info.wtype, _info.epsilon,
-                _info.in_stride, d, cuda_stream));
-        }
-    }
+    // gate and up are two halves of the interleaved gate_up buffer.
+    // Each token's layout is [gate[0..di) | up[0..di)], so gate starts at
+    // offset 0 and up starts at offset (di * dtype_sz) bytes within the
+    // first row; both use a row stride of 2*di elements (captured in the
+    // shared half_desc at create time).
+    const char *gu_bytes = static_cast<const char *>(gate_up_buf);
+    const void *gate_ptr = gu_bytes;
+    const void *up_ptr   = gu_bytes + di * dtype_sz;
 
-    // Stage 2: GateUp GEMM using cuBLAS
-    // gate_up = normalized @ gate_up_weight^T
-    // normalized: [ntok, d], gate_up_weight: [2*di, d] -> gate_up: [ntok, 2*di]
-    {
-        cudaDataType a_type, b_type, c_type;
-#if defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
-        cudaDataType compute_type;
-#else
-        cublasComputeType_t compute_type;
-#endif
-        getCublasTypes(_info.dtype, _info.mtype, a_type, b_type, c_type, compute_type);
+    // Stage 1: RMSNorm
+    CHECK_STATUS(_opaque->rms_norm->calculate(
+        inner_ws, inner_ws_size,
+        normalized_buf, in, norm_weight, stream));
 
-        float alpha = 1.0f, beta = 0.0f;
-        CHECK_STATUS(_opaque->internal->useCublas(
-            cuda_stream,
-            [&](cublasHandle_t handle) {
-                // For row-major C = A @ B^T with cuBLAS:
-                // Row-major A[ntok,d], B[2*di,d], C[ntok,2*di]
-                // -> Column-major A_col[d,ntok], B_col[d,2*di], C_col[2*di,ntok]
-                // C_col = B_col^T @ A_col^T
-                // Use transa=T, transb=N, m=2*di, n=ntok, k=d
-                CHECK_CUBLAS(
-                    cublasGemmStridedBatchedEx(
-                        handle,
-                        CUBLAS_OP_T,  // A (weight): transpose
-                        CUBLAS_OP_N,  // B (normalized): no transpose
-                        static_cast<int>(2 * di),  // m
-                        static_cast<int>(ntok),     // n
-                        static_cast<int>(d),        // k
-                        &alpha,
-                        gate_up_weight, b_type, static_cast<int>(d), 0,
-                        normalized_buf, a_type, static_cast<int>(d), 0,
-                        &beta,
-                        gate_up_buf, c_type, static_cast<int>(2 * di), 0,
-                        1,  // batch count
-                        compute_type,
-                        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-                return INFINI_STATUS_SUCCESS;
-            }));
-    }
+    // Stage 2: GateUp GEMM  -->  gate_up_buf = normalized_buf @ gate_up_weight
+    CHECK_STATUS(_opaque->gate_up_gemm->calculate(
+        inner_ws, inner_ws_size,
+        gate_up_buf, /*beta=*/0.f,
+        normalized_buf, gate_up_weight,
+        /*alpha=*/1.f, stream));
 
-    // Stage 3: SwiGLU transform (in-place, overwrites gate half of gate_up_buf)
-    if (_opaque->internal->maxThreadsPerBlock() >= CUDA_BLOCK_SIZE_1024) {
-        CHECK_STATUS(launchSwigluKernel<1024>(
-            ntok, di,
-            gate_up_buf,
-            _info.dtype,
-            2 * di,
-            cuda_stream));
-    } else {
-        CHECK_STATUS(launchSwigluKernel<512>(
-            ntok, di,
-            gate_up_buf,
-            _info.dtype,
-            2 * di,
-            cuda_stream));
-    }
+    // Stage 3: SwiGLU  -->  hidden_buf = silu(gate) * up
+    // swiglu::nvidia expects inputs ordered {up, gate}; see
+    // swiglu_nvidia.cu input_desc_vec[0]=up, [1]=gate.
+    CHECK_STATUS(_opaque->swiglu->calculate(
+        inner_ws, inner_ws_size,
+        hidden_buf, {up_ptr, gate_ptr}, stream));
 
-    // Stage 4: Down GEMM using cuBLAS
-    // Read from gate_up_buf (stride 2*di) to match non-fused path's buffer layout
-    // This ensures cuBLAS selects the same algorithm, producing bit-identical results
-    {
-        cudaDataType a_type, b_type, c_type;
-#if defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
-        cudaDataType compute_type;
-#else
-        cublasComputeType_t compute_type;
-#endif
-        getCublasTypes(_info.dtype, _info.mtype, a_type, b_type, c_type, compute_type);
+    // Stage 4: Down GEMM, with optional in-place residual fuse via beta=1.
+    //   fuse path : out = 1.0 * out + hidden_buf @ down_weight
+    //   plain path: out = 0.0 * out + hidden_buf @ down_weight
+    const bool fuse_residual =
+        _opaque->has_residual && (out == residual);
+    CHECK_STATUS(_opaque->down_gemm->calculate(
+        inner_ws, inner_ws_size,
+        out, /*beta=*/fuse_residual ? 1.f : 0.f,
+        hidden_buf, down_weight,
+        /*alpha=*/1.f, stream));
 
-        bool fuse_residual = _info.has_residual && (out == residual);
-        float alpha = 1.0f, beta = fuse_residual ? 1.0f : 0.0f;
-        CHECK_STATUS(_opaque->internal->useCublas(
-            cuda_stream,
-            [&](cublasHandle_t handle) {
-                CHECK_CUBLAS(
-                    cublasGemmStridedBatchedEx(
-                        handle,
-                        CUBLAS_OP_T,  // A (weight): transpose
-                        CUBLAS_OP_N,  // B (hidden): no transpose
-                        static_cast<int>(d),     // m
-                        static_cast<int>(ntok),  // n
-                        static_cast<int>(di),    // k
-                        &alpha,
-                        down_weight, b_type, static_cast<int>(di), 0,
-                        gate_up_buf, a_type, static_cast<int>(2 * di), 0,  // ldb=2*di to match non-fused path
-                        &beta,
-                        out, c_type, static_cast<int>(_info.out_stride), 0,
-                        1,  // batch count
-                        compute_type,
-                        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-                return INFINI_STATUS_SUCCESS;
-            }));
-    }
-
-    // Stage 5: Residual Add (only when not fused into GEMM)
-    if (_info.has_residual && out != residual) {
-        if (_opaque->internal->maxThreadsPerBlock() >= CUDA_BLOCK_SIZE_1024) {
-            CHECK_STATUS(launchResidualAddKernel<1024>(
-                ntok, d,
-                out, out, residual,
-                _info.dtype,
-                _info.out_stride, _info.residual_stride,
-                cuda_stream));
-        } else {
-            CHECK_STATUS(launchResidualAddKernel<512>(
-                ntok, d,
-                out, out, residual,
-                _info.dtype,
-                _info.out_stride, _info.residual_stride,
-                cuda_stream));
-        }
+    // Stage 5: Residual add (only when the in-place fuse did not apply).
+    if (_opaque->has_residual && !fuse_residual) {
+        CHECK_STATUS(_opaque->residual_add->calculate(
+            inner_ws, inner_ws_size,
+            out, {out, residual}, stream));
     }
 
     return INFINI_STATUS_SUCCESS;

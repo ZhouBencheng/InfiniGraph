@@ -16,6 +16,7 @@ import math
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from statistics import mean, median, stdev
 from typing import List
@@ -270,7 +271,13 @@ def verify_correctness(model: JiugeForCauslLM, vocab_size: int):
         print("  The fused FFN may have numerical differences. Proceed with caution.")
 
     print()
-    return passed
+    verify_data = {
+        "max_diff": max_diff,
+        "mean_diff": mean_diff,
+        "cos_sim": cos_sim,
+        "passed": passed,
+    }
+    return passed, verify_data
 
 
 # ── Benchmark Runner ────────────────────────────────────────────────
@@ -354,7 +361,15 @@ def benchmark_scenario(model: JiugeForCauslLM, case: dict, vocab_size: int):
             sp = speedup(nf_l, f_l)
             print(f"  {idx:<10} {nf_l:>12.3f} {f_l:>12.3f} {sp:>+9.1f}%")
 
-    return results
+    computed = {
+        "nf_e2e": nf_e2e, "f_e2e": f_e2e,
+        "nf_ffn": nf_ffn, "f_ffn": f_ffn,
+        "avg_nf_layer": avg_nf_layer, "avg_f_layer": avg_f_layer,
+        "nf_throughput": nf_throughput, "f_throughput": f_throughput,
+        "nf_per_layer": nf_per_layer, "f_per_layer": f_per_layer,
+        "n_layers": n_layers,
+    }
+    return results, computed
 
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -378,6 +393,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=5, help="Warmup rounds")
     parser.add_argument("--rounds", type=int, default=10, help="Measured rounds")
     parser.add_argument("--skip-verify", action="store_true", help="Skip correctness check")
+    parser.add_argument("--output", "-o", type=str, default=None,
+                        help="Save results to a markdown file (e.g. results.md)")
     args = parser.parse_args()
 
     global WARMUP_ROUNDS, MEASURED_ROUNDS
@@ -412,8 +429,9 @@ def main():
     vocab_size = model.meta.dvoc
 
     # Correctness verification
+    verify_data = None
     if not args.skip_verify:
-        passed = verify_correctness(model, vocab_size)
+        passed, verify_data = verify_correctness(model, vocab_size)
         if not passed:
             print("Correctness check FAILED. Aborting benchmark.")
             model.destroy_model_instance()
@@ -421,9 +439,11 @@ def main():
 
     # Run benchmarks
     all_results = {}
+    all_computed = {}
     for case in TEST_CASES:
-        results = benchmark_scenario(model, case, vocab_size)
+        results, computed = benchmark_scenario(model, case, vocab_size)
         all_results[case["label"]] = results
+        all_computed[case["label"]] = computed
 
     # Summary
     print("\n" + "=" * 60)
@@ -441,6 +461,106 @@ def main():
     # Cleanup
     model.destroy_model_instance()
     print("\nBenchmark complete.")
+
+    # Save to markdown if requested
+    if args.output:
+        save_markdown_report(args, verify_data, all_computed, all_results)
+        print(f"Results saved to {args.output}")
+
+
+def save_markdown_report(args, verify_data, all_computed, all_results):
+    """Write benchmark results to a markdown file."""
+    lines = []
+
+    def L(s=""):
+        lines.append(s)
+
+    def speedup_pct(a, b):
+        return ((a - b) / a * 100) if a > 0 else 0
+
+    # ── Header ──────────────────────────────────────────────────────
+    L("# Fused FFN End-to-End Benchmark Report")
+    L()
+    L(f"- **Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    L(f"- **Model:** `{args.model_path}`")
+    L(f"- **Device:** {args.device} (x{args.n_device})")
+    L(f"- **Warmup rounds:** {args.warmup}")
+    L(f"- **Measured rounds:** {args.rounds}")
+    L()
+
+    # ── Correctness ─────────────────────────────────────────────────
+    if verify_data:
+        L("## Correctness Verification")
+        L()
+        status = "PASS" if verify_data["passed"] else "FAIL"
+        L(f"| Metric | Value |")
+        L(f"|--------|-------|")
+        L(f"| Max absolute diff | `{verify_data['max_diff']:.6e}` |")
+        L(f"| Mean absolute diff | `{verify_data['mean_diff']:.6e}` |")
+        L(f"| Cosine similarity | `{verify_data['cos_sim']:.8f}` |")
+        L(f"| Status | **{status}** (threshold: 0.999) |")
+        L()
+
+    # ── Per-scenario results ────────────────────────────────────────
+    L("## Per-Scenario Results")
+    L()
+    for case in TEST_CASES:
+        label = case["label"]
+        bs, n_in, n_out = case["batch_size"], case["input_tokens"], case["output_tokens"]
+        c = all_computed[label]
+
+        L(f"### {label}")
+        L()
+        L(f"`batch_size={bs}, input_tokens={n_in}, output_tokens={n_out}`")
+        L()
+        L("| Metric | Non-Fused (ms) | Fused (ms) | Speedup |")
+        L("|--------|---------------|------------|---------|")
+        e2e_sp = speedup_pct(c["nf_e2e"][0], c["f_e2e"][0])
+        ffn_sp = speedup_pct(c["nf_ffn"][0], c["f_ffn"][0])
+        layer_sp = speedup_pct(c["avg_nf_layer"], c["avg_f_layer"])
+        thrput_sp = speedup_pct(c["nf_throughput"], c["f_throughput"])
+        L(f"| E2E Latency (mean) | {c['nf_e2e'][0]:.2f} | {c['f_e2e'][0]:.2f} | {e2e_sp:+.1f}% |")
+        L(f"| E2E Median | {c['nf_e2e'][1]:.2f} | {c['f_e2e'][1]:.2f} | |")
+        L(f"| FFN Total (mean) | {c['nf_ffn'][0]:.2f} | {c['f_ffn'][0]:.2f} | {ffn_sp:+.1f}% |")
+        L(f"| FFN Avg/Layer | {c['avg_nf_layer']:.3f} | {c['avg_f_layer']:.3f} | {layer_sp:+.1f}% |")
+        L(f"| Throughput (tok/s) | {c['nf_throughput']:.2f} | {c['f_throughput']:.2f} | {thrput_sp:+.1f}% |")
+        L()
+
+        # Per-layer breakdown
+        nf_pl = c["nf_per_layer"]
+        f_pl = c["f_per_layer"]
+        n_layers = c["n_layers"]
+        if n_layers > 0:
+            indices = list(range(min(5, n_layers)))
+            if n_layers > 10:
+                indices += list(range(n_layers - 5, n_layers))
+            elif n_layers > 5:
+                indices += list(range(5, n_layers))
+            L("Per-layer FFN breakdown:")
+            L()
+            L("| Layer | Non-Fused (ms) | Fused (ms) | Speedup |")
+            L("|-------|---------------|------------|---------|")
+            for idx in indices:
+                sp = speedup_pct(nf_pl[idx], f_pl[idx])
+                L(f"| {idx} | {nf_pl[idx]:.3f} | {f_pl[idx]:.3f} | {sp:+.1f}% |")
+            L()
+
+    # ── Summary ─────────────────────────────────────────────────────
+    L("## Summary")
+    L()
+    L("| Scenario | NF FFN (ms) | F FFN (ms) | Speedup |")
+    L("|----------|------------|-----------|---------|")
+    for case in TEST_CASES:
+        label = case["label"]
+        nf = mean(all_results[label]["non_fused"]["ffn_total"])
+        f = mean(all_results[label]["fused"]["ffn_total"])
+        sp = speedup_pct(nf, f)
+        L(f"| {label} | {nf:.2f} | {f:.2f} | {sp:+.1f}% |")
+    L()
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
