@@ -1,5 +1,7 @@
 #include "../../../devices/nvidia/nvidia_common.cuh"
+#include "../../../devices/nvidia/nvidia_kernel_common.cuh"
 #include "fused_ffn_nvidia.cuh"
+#include "kernel.cuh"
 
 // Each op's public header re-defines a DESCRIPTOR(NAMESPACE) macro without
 // guarding it, so including multiple sub-op headers in this TU clashes.
@@ -15,6 +17,7 @@
 #include "../../swiglu/nvidia/swiglu_nvidia.cuh"
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -89,6 +92,19 @@ struct Descriptor::Opaque {
 
     bool has_residual = false;
 
+    // Deep-fused Gate-Up + SwiGLU (paper-style fusion) config.
+    // Decided at create-time via env var INFINIOP_FUSED_FFN_DEEP and
+    // a profile-driven scheduler that checks ntok against a threshold:
+    //   INFINIOP_FUSED_FFN_DEEP=0 or unset -> always 5-stage (default)
+    //   INFINIOP_FUSED_FFN_DEEP=1          -> scheduler: deep-fused when
+    //       ntok <= threshold, else 5-stage. Threshold defaults to 4 and
+    //       can be overridden with INFINIOP_FUSED_FFN_DEEP_MAX_NTOK.
+    //   INFINIOP_FUSED_FFN_DEEP=2          -> force deep-fused always
+    //       (debug/profiling only; will regress at large ntok)
+    bool use_deep_fused = false;
+    ptrdiff_t gate_up_w_k_stride = 0;
+    ptrdiff_t gate_up_w_col_stride = 0;
+
     // Sub-descriptors owned by this fused op; each one is a standard
     // InfiniopDescriptor for the corresponding standalone operator.
     std::unique_ptr<op::rms_norm::nvidia::Descriptor> rms_norm;
@@ -129,6 +145,50 @@ infiniStatus_t Descriptor::create(
     const size_t d    = info.d();
     const size_t di   = info.di();
     const size_t dtype_sz = infiniSizeOf(info.dtype);
+
+    // Profile-driven scheduler for the deep-fused kernel path.
+    //   INFINIOP_FUSED_FFN_DEEP=0/unset -> always 5-stage (default)
+    //   INFINIOP_FUSED_FFN_DEEP=1       -> scheduler: use deep-fused only
+    //       when ntok <= max_ntok threshold (default 4); fall back to
+    //       5-stage for larger shapes where cuBLAS tensor-core GEMM wins.
+    //   INFINIOP_FUSED_FFN_DEEP=2       -> force deep-fused always (debug)
+    // Threshold is tunable via INFINIOP_FUSED_FFN_DEEP_MAX_NTOK (default 4).
+    {
+        const char *env = std::getenv("INFINIOP_FUSED_FFN_DEEP");
+        if (env != nullptr && env[0] == '2') {
+            // Mode 2: force deep-fused regardless of shape
+            opaque->use_deep_fused = true;
+        } else if (env != nullptr && env[0] == '1') {
+            // Mode 1: scheduler — deep-fused only for small ntok
+            size_t max_ntok = 4;
+            const char *thr = std::getenv("INFINIOP_FUSED_FFN_DEEP_MAX_NTOK");
+            if (thr != nullptr) {
+                max_ntok = static_cast<size_t>(std::atol(thr));
+                if (max_ntok == 0) max_ntok = 4;
+            }
+            opaque->use_deep_fused = (ntok <= max_ntok);
+        }
+        // Mode 0 / unset: use_deep_fused stays false (5-stage)
+    }
+
+    // Extract gate_up weight strides at create time so the deep-fused kernel
+    // can index [k, j] regardless of whether storage is Layout A [2*di, d]
+    // or Layout B [d, 2*di]. Layout is identified by which descriptor dim
+    // equals 2*di (the output column axis) vs d (the K axis).
+    {
+        const size_t gu_dim0 = gate_up_weight_desc->dim(0);
+        const ptrdiff_t gu_s0 = gate_up_weight_desc->stride(0);
+        const ptrdiff_t gu_s1 = gate_up_weight_desc->stride(1);
+        if (gu_dim0 == 2 * di) {
+            // Layout A: [2*di, d] — output column is dim0, K is dim1.
+            opaque->gate_up_w_col_stride = gu_s0;
+            opaque->gate_up_w_k_stride = gu_s1;
+        } else {
+            // Layout B: [d, 2*di] — K is dim0, output column is dim1.
+            opaque->gate_up_w_k_stride = gu_s0;
+            opaque->gate_up_w_col_stride = gu_s1;
+        }
+    }
 
     // ── Workspace layout ──
     //   normalized : [ntok, d]     contiguous   -> RMSNorm out,   GateUp in
@@ -291,19 +351,67 @@ infiniStatus_t Descriptor::calculate(
         inner_ws, inner_ws_size,
         normalized_buf, in, norm_weight, stream));
 
-    // Stage 2: GateUp GEMM  -->  gate_up_buf = normalized_buf @ gate_up_weight
-    CHECK_STATUS(_opaque->gate_up_gemm->calculate(
-        inner_ws, inner_ws_size,
-        gate_up_buf, /*beta=*/0.f,
-        normalized_buf, gate_up_weight,
-        /*alpha=*/1.f, stream));
+    if (_opaque->use_deep_fused) {
+        // Stage 2+3 fused: one kernel produces hidden = SiLU(norm@Wg) * (norm@Wu)
+        // directly, eliminating the gate_up_buf HBM round-trip. Row strides
+        // for X and hidden are d and di respectively (contiguous buffers
+        // allocated at create time).
+        cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+        const size_t ntok = _info.ntok();
+        const size_t d = _info.d();
+        const size_t di = _info.di();
 
-    // Stage 3: SwiGLU  -->  hidden_buf = silu(gate) * up
-    // swiglu::nvidia expects inputs ordered {up, gate}; see
-    // swiglu_nvidia.cu input_desc_vec[0]=up, [1]=gate.
-    CHECK_STATUS(_opaque->swiglu->calculate(
-        inner_ws, inner_ws_size,
-        hidden_buf, {up_ptr, gate_ptr}, stream));
+        constexpr unsigned int kBlock = 256;
+        dim3 grid(static_cast<unsigned>(ntok), static_cast<unsigned>(di));
+        dim3 block(kBlock);
+
+#define DEEP_FUSED_LAUNCH(TD, TW)                                        \
+    deepFusedGateUpSiluKernel<kBlock, float, TD, TW>                    \
+        <<<grid, block, 0, cuda_stream>>>(                              \
+            reinterpret_cast<TD *>(hidden_buf),                          \
+            reinterpret_cast<const TD *>(normalized_buf),                \
+            reinterpret_cast<const TW *>(gate_up_weight),                \
+            ntok, d, di,                                                 \
+            static_cast<ptrdiff_t>(d),                                   \
+            static_cast<ptrdiff_t>(di),                                  \
+            _opaque->gate_up_w_k_stride,                                 \
+            _opaque->gate_up_w_col_stride,                               \
+            /*gate_col_base=*/0u, /*up_col_base=*/di)
+
+        if (_info.dtype == INFINI_DTYPE_F16 && _info.mtype == INFINI_DTYPE_F16) {
+            DEEP_FUSED_LAUNCH(half, half);
+        } else if (_info.dtype == INFINI_DTYPE_BF16 && _info.mtype == INFINI_DTYPE_BF16) {
+            DEEP_FUSED_LAUNCH(__nv_bfloat16, __nv_bfloat16);
+        } else if (_info.dtype == INFINI_DTYPE_F32 && _info.mtype == INFINI_DTYPE_F32) {
+            DEEP_FUSED_LAUNCH(float, float);
+        } else if (_info.dtype == INFINI_DTYPE_F16 && _info.mtype == INFINI_DTYPE_F32) {
+            DEEP_FUSED_LAUNCH(half, float);
+        } else if (_info.dtype == INFINI_DTYPE_BF16 && _info.mtype == INFINI_DTYPE_F32) {
+            DEEP_FUSED_LAUNCH(__nv_bfloat16, float);
+        } else {
+            return INFINI_STATUS_BAD_TENSOR_DTYPE;
+        }
+#undef DEEP_FUSED_LAUNCH
+        // Avoid unused-variable warnings for the baseline-only pointers when
+        // the deep-fused branch takes over stage 2/3.
+        (void)gate_up_buf;
+        (void)gate_ptr;
+        (void)up_ptr;
+    } else {
+        // Stage 2: GateUp GEMM  -->  gate_up_buf = normalized_buf @ gate_up_weight
+        CHECK_STATUS(_opaque->gate_up_gemm->calculate(
+            inner_ws, inner_ws_size,
+            gate_up_buf, /*beta=*/0.f,
+            normalized_buf, gate_up_weight,
+            /*alpha=*/1.f, stream));
+
+        // Stage 3: SwiGLU  -->  hidden_buf = silu(gate) * up
+        // swiglu::nvidia expects inputs ordered {up, gate}; see
+        // swiglu_nvidia.cu input_desc_vec[0]=up, [1]=gate.
+        CHECK_STATUS(_opaque->swiglu->calculate(
+            inner_ws, inner_ws_size,
+            hidden_buf, {up_ptr, gate_ptr}, stream));
+    }
 
     // Stage 4: Down GEMM, with optional in-place residual fuse via beta=1.
     //   fuse path : out = 1.0 * out + hidden_buf @ down_weight

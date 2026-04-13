@@ -1,5 +1,5 @@
 from .base import BaseModel, DataType, DeviceType, KVCacheCStruct, register_model
-from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p, POINTER, Structure, byref, cast
+from ctypes import c_size_t, c_uint, c_int, c_float, c_void_p, POINTER, Structure
 
 
 class JiugeMetaCStruct(Structure):
@@ -100,12 +100,6 @@ class JiugeModel(BaseModel):
         ]
 
         lib.setJiugeFusedFFN.argtypes = [POINTER(JiugeModelCStruct), c_int]
-        lib.getJiugeFFNProfile.argtypes = [
-            POINTER(JiugeModelCStruct),
-            POINTER(c_float),
-            POINTER(c_float),
-            POINTER(c_int),
-        ]
 
     def create_model(self, meta, weights, device_type, ndev, dev_ids):
         return self.lib.createJiugeModel(meta, weights, device_type, ndev, dev_ids)
@@ -160,16 +154,3 @@ class JiugeModel(BaseModel):
 
     def set_fused_ffn(self, model, use_fused):
         self.lib.setJiugeFusedFFN(model, 1 if use_fused else 0)
-
-    def get_ffn_profile(self, model):
-        total_ms = c_float(0)
-        n_layers = c_int(0)
-        # First call to get n_layers (pass NULL for per_layer_ms)
-        self.lib.getJiugeFFNProfile(model, byref(total_ms), POINTER(c_float)(), byref(n_layers))
-        per_layer = (c_float * max(n_layers.value, 1))()
-        self.lib.getJiugeFFNProfile(model, byref(total_ms), per_layer, byref(n_layers))
-        return {
-            "total_ms": total_ms.value,
-            "per_layer_ms": [per_layer[i] for i in range(n_layers.value)],
-            "n_layers": n_layers.value,
-        }

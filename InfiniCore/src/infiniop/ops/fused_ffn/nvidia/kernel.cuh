@@ -134,4 +134,93 @@ INFINIOP_CUDA_KERNEL residualAddKernel(
     }
 }
 
+// ── Deep-fused Gate-Up GEMM + SwiGLU ────────────────────────────────
+//
+// Reproduces the paper-style fusion of DeepFusionKernel (Zhang et al., 2026)
+// by streaming both matmul tiles and the SiLU-gated mul through registers,
+// eliminating the gate_up_buf HBM round-trip that sits between the separate
+// gate_up_gemm and swiglu kernels in the non-fused pipeline.
+//
+// For each output element hidden[token, col]:
+//     gate = Σ_k X[token, k] * W_gate[k, col]
+//     up   = Σ_k X[token, k] * W_up  [k, col]
+//     hidden[token, col] = (gate * sigmoid(gate)) * up
+//
+// Grid : (ntok, di)
+// Block: BLOCK_SIZE threads cooperatively reducing over K=d.
+//
+// The weight pointer is the raw user pointer. w_k_stride and w_col_stride are
+// the physical element strides when moving along K and along the output
+// column axis respectively, so both [2*di, d] (layout A) and [d, 2*di]
+// (layout B) storages are supported by choosing (stride_k, stride_col).
+template <unsigned int BLOCK_SIZE, typename Tcompute, typename Tdata, typename Tweight>
+__device__ void deepFusedGateUpSiluBlock(
+    Tdata *__restrict__ hidden,
+    const Tdata *__restrict__ x,
+    const Tweight *__restrict__ w,
+    size_t d,
+    ptrdiff_t x_row_stride,
+    ptrdiff_t hidden_row_stride,
+    ptrdiff_t w_k_stride,
+    ptrdiff_t w_col_stride,
+    size_t gate_col_base,
+    size_t up_col_base) {
+
+    const size_t token = blockIdx.x;
+    const size_t col = blockIdx.y;
+
+    auto x_ptr = x + token * x_row_stride;
+    auto h_ptr = hidden + token * hidden_row_stride;
+
+    const Tweight *w_gate_col = w + (gate_col_base + col) * w_col_stride;
+    const Tweight *w_up_col = w + (up_col_base + col) * w_col_stride;
+
+    Tcompute gate_acc = Tcompute(0);
+    Tcompute up_acc = Tcompute(0);
+
+    for (size_t k = threadIdx.x; k < d; k += BLOCK_SIZE) {
+        Tcompute x_val = Tcompute(x_ptr[k]);
+        Tcompute w_g = Tcompute(w_gate_col[k * w_k_stride]);
+        Tcompute w_u = Tcompute(w_up_col[k * w_k_stride]);
+        gate_acc += x_val * w_g;
+        up_acc += x_val * w_u;
+    }
+
+    using BlockReduce = cub::BlockReduce<Tcompute, BLOCK_SIZE>;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    Tcompute gate_sum = BlockReduce(temp_storage).Sum(gate_acc);
+    __syncthreads();
+    Tcompute up_sum = BlockReduce(temp_storage).Sum(up_acc);
+
+    if (threadIdx.x == 0) {
+        Tcompute sig = Tcompute(1.0f) / (Tcompute(1.0f) + exp_(-gate_sum));
+        Tcompute silu = gate_sum * sig;
+        h_ptr[col] = Tdata(silu * up_sum);
+    }
+}
+
+template <unsigned int BLOCK_SIZE, typename Tcompute, typename Tdata, typename Tweight>
+INFINIOP_CUDA_KERNEL deepFusedGateUpSiluKernel(
+    Tdata *__restrict__ hidden,
+    const Tdata *__restrict__ x,
+    const Tweight *__restrict__ w,
+    size_t ntok,
+    size_t d,
+    size_t di,
+    ptrdiff_t x_row_stride,
+    ptrdiff_t hidden_row_stride,
+    ptrdiff_t w_k_stride,
+    ptrdiff_t w_col_stride,
+    size_t gate_col_base,
+    size_t up_col_base) {
+    if (blockIdx.x < ntok && blockIdx.y < di) {
+        deepFusedGateUpSiluBlock<BLOCK_SIZE, Tcompute>(
+            hidden, x, w, d,
+            x_row_stride, hidden_row_stride,
+            w_k_stride, w_col_stride,
+            gate_col_base, up_col_base);
+    }
+}
+
 #endif // __FUSED_FFN_CUDA_KERNEL_H__

@@ -31,12 +31,6 @@ struct JiugeDeviceResource {
 
     // Fused FFN mode
     bool use_fused_ffn = false;
-
-    // Profiling events for FFN
-    infinirtEvent_t ffn_start_event = nullptr;
-    infinirtEvent_t ffn_end_event = nullptr;
-    std::vector<float> ffn_layer_times_ms;
-    float ffn_total_time_ms = 0;
 };
 
 struct InferState {
