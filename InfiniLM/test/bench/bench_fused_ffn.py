@@ -66,27 +66,36 @@ from infer_task import InferTask, KVCache            # noqa: E402
 # (NOT to full max_position_embeddings, which would OOM at large bs).
 
 TEST_CASES: List[dict] = [
-    # ── Single-batch decode (baseline) ──
-    {"label": "Decode (bs=1, seq=1)",            "batch_size": 1,  "input_tokens": 1,    "output_tokens": 32},
-    # ── Batched decode ──
-    {"label": "Batched Decode (bs=4, seq=1)",    "batch_size": 4,  "input_tokens": 1,    "output_tokens": 32},
-    {"label": "Batched Decode (bs=8, seq=1)",    "batch_size": 8,  "input_tokens": 1,    "output_tokens": 32},
-    {"label": "Batched Decode (bs=16, seq=1)",   "batch_size": 16, "input_tokens": 1,    "output_tokens": 32},
-    {"label": "Batched Decode (bs=32, seq=1)",   "batch_size": 32, "input_tokens": 1,    "output_tokens": 32},
-    # ── Batched prefill ──
-    {"label": "Batched Prefill (bs=2, seq=256)", "batch_size": 2,  "input_tokens": 256,  "output_tokens": 32},
-    {"label": "Batched Prefill (bs=4, seq=256)", "batch_size": 4,  "input_tokens": 256,  "output_tokens": 32},
-    {"label": "Batched Prefill (bs=4, seq=512)", "batch_size": 4,  "input_tokens": 512,  "output_tokens": 1},
-    {"label": "Batched Prefill (bs=8, seq=512)", "batch_size": 8,  "input_tokens": 512,  "output_tokens": 1},
-    # ── Single-batch prefill: small → large ──
-    {"label": "Prefill (bs=1, seq=32)",          "batch_size": 1,  "input_tokens": 32,   "output_tokens": 32},
-    {"label": "Prefill (bs=1, seq=64)",          "batch_size": 1,  "input_tokens": 64,   "output_tokens": 32},
-    {"label": "Prefill (bs=1, seq=128)",         "batch_size": 1,  "input_tokens": 128,  "output_tokens": 32},
-    {"label": "Prefill (bs=1, seq=256)",         "batch_size": 1,  "input_tokens": 256,  "output_tokens": 32},
-    {"label": "Prefill (bs=1, seq=512)",         "batch_size": 1,  "input_tokens": 512,  "output_tokens": 32},
-    {"label": "Prefill (bs=1, seq=1024)",        "batch_size": 1,  "input_tokens": 1024, "output_tokens": 32},
-    {"label": "Prefill (bs=1, seq=2048)",        "batch_size": 1,  "input_tokens": 2048, "output_tokens": 1},
-    {"label": "Prefill (bs=1, seq=4096)",        "batch_size": 1,  "input_tokens": 4096, "output_tokens": 1},
+    # ── GEMV-shaped: seq=1, varying batch size ──
+    {"label": "bs=1,  seq=1",    "batch_size": 1,  "input_tokens": 1,    "output_tokens": 32},
+    {"label": "bs=4,  seq=1",    "batch_size": 4,  "input_tokens": 1,    "output_tokens": 32},
+    {"label": "bs=8,  seq=1",    "batch_size": 8,  "input_tokens": 1,    "output_tokens": 32},
+    {"label": "bs=16, seq=1",    "batch_size": 16, "input_tokens": 1,    "output_tokens": 32},
+    {"label": "bs=32, seq=1",    "batch_size": 32, "input_tokens": 1,    "output_tokens": 32},
+    # ── GEMM-shaped: batched, longer sequences ──
+    {"label": "bs=2,  seq=64",   "batch_size": 2,  "input_tokens": 64,   "output_tokens": 32},
+    {"label": "bs=2,  seq=128",  "batch_size": 2,  "input_tokens": 128,  "output_tokens": 32},
+    {"label": "bs=2,  seq=256",  "batch_size": 2,  "input_tokens": 256,  "output_tokens": 32},
+    {"label": "bs=4,  seq=64",   "batch_size": 4,  "input_tokens": 64,   "output_tokens": 32},
+    {"label": "bs=4,  seq=128",  "batch_size": 4,  "input_tokens": 128,  "output_tokens": 32},
+    {"label": "bs=4,  seq=256",  "batch_size": 4,  "input_tokens": 256,  "output_tokens": 32},
+    {"label": "bs=4,  seq=512",  "batch_size": 4,  "input_tokens": 512,  "output_tokens": 1},
+    {"label": "bs=8,  seq=64",   "batch_size": 8,  "input_tokens": 64,   "output_tokens": 32},
+    {"label": "bs=8,  seq=128",  "batch_size": 8,  "input_tokens": 128,  "output_tokens": 32},
+    {"label": "bs=8,  seq=256",  "batch_size": 8,  "input_tokens": 256,  "output_tokens": 32},
+    {"label": "bs=8,  seq=512",  "batch_size": 8,  "input_tokens": 512,  "output_tokens": 1},
+    {"label": "bs=16, seq=64",   "batch_size": 16, "input_tokens": 64,   "output_tokens": 1},
+    {"label": "bs=16, seq=128",  "batch_size": 16, "input_tokens": 128,  "output_tokens": 1},
+    {"label": "bs=16, seq=256",  "batch_size": 16, "input_tokens": 256,  "output_tokens": 1},
+    # ── GEMM-shaped: single batch, scaling sequence length ──
+    {"label": "bs=1,  seq=32",   "batch_size": 1,  "input_tokens": 32,   "output_tokens": 32},
+    {"label": "bs=1,  seq=64",   "batch_size": 1,  "input_tokens": 64,   "output_tokens": 32},
+    {"label": "bs=1,  seq=128",  "batch_size": 1,  "input_tokens": 128,  "output_tokens": 32},
+    {"label": "bs=1,  seq=256",  "batch_size": 1,  "input_tokens": 256,  "output_tokens": 32},
+    {"label": "bs=1,  seq=512",  "batch_size": 1,  "input_tokens": 512,  "output_tokens": 32},
+    {"label": "bs=1,  seq=1024", "batch_size": 1,  "input_tokens": 1024, "output_tokens": 32},
+    {"label": "bs=1,  seq=2048", "batch_size": 1,  "input_tokens": 2048, "output_tokens": 1},
+    {"label": "bs=1,  seq=4096", "batch_size": 1,  "input_tokens": 4096, "output_tokens": 1},
 ]
 
 

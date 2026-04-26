@@ -78,8 +78,8 @@ def _speedup_pct(nf: float, f: float) -> float:
     return ((nf - f) / nf * 100.0) if nf and nf > 0 else 0.0
 
 
-def _is_decode(label: str) -> bool:
-    return "Decode" in label
+def _is_seq1(label: str) -> bool:
+    return "seq=1" in label
 
 
 def _savefig(fig, path: Path, fmt: str):
@@ -122,7 +122,7 @@ def _plot_speedup_overview(all_samples, test_cases, out, meta, fmt):
     bars = ax.barh(y, speedups, color=colors, edgecolor="#333", height=0.7)
 
     for i, label in enumerate(labels):
-        if _is_decode(label):
+        if _is_seq1(label):
             ax.axhspan(i - 0.5, i + 0.5, alpha=0.07,
                        color="#3498db", zorder=-1)
 
@@ -340,10 +340,10 @@ def _plot_throughput_scaling(all_samples, test_cases, out, meta, fmt):
 
     _draw(ax1, batch_cases, "batch_size",
           "batch_size  (input_tokens = 1)", logx=False)
-    ax1.set_title("Batch Scaling (decode)")
+    ax1.set_title("Batch Scaling (seq=1, GEMV)")
     _draw(ax2, seq_cases, "input_tokens",
           "input_tokens  (batch_size = 1, log₂)", logx=True)
-    ax2.set_title("Sequence Scaling (prefill)")
+    ax2.set_title("Sequence Scaling (bs=1, GEMM)")
 
     fig.suptitle(f"End-to-End Throughput Scaling\n{_title_suffix(meta)}",
                  fontsize=11)
@@ -373,11 +373,11 @@ def _plot_paired_delta(all_samples, test_cases, out, meta, fmt):
     picks = []
     for c in test_cases:
         if c["label"] in {
-            "Decode (bs=1, seq=1)",
-            "Batched Decode (bs=32, seq=1)",
-            "Prefill (bs=1, seq=128)",
-            "Prefill (bs=1, seq=1024)",
-            "Batched Prefill (bs=4, seq=256)",
+            "bs=1,  seq=1",
+            "bs=32, seq=1",
+            "bs=1,  seq=128",
+            "bs=1,  seq=1024",
+            "bs=4,  seq=256",
         }:
             picks.append(c)
     if not picks:
