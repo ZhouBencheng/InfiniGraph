@@ -432,6 +432,17 @@ void test_phase_detector_kv_cache() {
     ASSERT_EQ(static_cast<int>(phase), static_cast<int>(PhaseType::KV_CACHE));
 }
 
+void test_phase_detector_communication() {
+    PhaseDetector detector;
+    auto window = makeWindow({
+        OpType::ALLREDUCE, OpType::ALLREDUCE, OpType::ALLREDUCE,
+        OpType::GEMM, OpType::ADD
+    });
+
+    auto phase = detector.detect(window);
+    ASSERT_EQ(static_cast<int>(phase), static_cast<int>(PhaseType::COMMUNICATION));
+}
+
 void test_phase_detector_decode() {
     PhaseDetector detector;
     // seq_len=1 → decode
@@ -1104,6 +1115,7 @@ int main() {
     RUN_TEST(phase_detector_attention);
     RUN_TEST(phase_detector_gemm_mlp);
     RUN_TEST(phase_detector_kv_cache);
+    RUN_TEST(phase_detector_communication);
     RUN_TEST(phase_detector_decode);
     RUN_TEST(phase_detector_prefill);
     RUN_TEST(phase_detector_empty);

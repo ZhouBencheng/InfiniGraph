@@ -119,7 +119,7 @@ static std::vector<WorkloadCase> buildCases() {
          "ATTENTION x20, FLASH_ATTENTION x10, CAUSAL_SOFTMAX x12, ROPE x8, RMS_NORM x6",
          PhaseType::ATTENTION_DENSE,
          std::vector<OpType>(30, OpType::FLASH_ATTENTION),
-         128},
+         16},
         {"5/6", "KV cache manipulation",
          "KV_CACHING x24, PAGED_CACHING x12, ADD x12, RMS_NORM x8",
          PhaseType::KV_CACHE,

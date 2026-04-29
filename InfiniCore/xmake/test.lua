@@ -123,12 +123,14 @@ target_end()
 target("analyzer-demo")
     set_kind("binary")
     set_default(false)
-    add_deps("infinicore_cpp_api", "infinirt")
+    add_deps("infinirt")
 
     set_languages("cxx17")
     set_warnings("all", "error")
 
     add_includedirs("include")
+    add_files(os.projectdir().."/src/infinicore/device.cc")
+    add_files(os.projectdir().."/src/infinicore/analyzer/*.cc")
     add_files(os.projectdir().."/src/analyzer-demo/*.cc")
 
     set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))

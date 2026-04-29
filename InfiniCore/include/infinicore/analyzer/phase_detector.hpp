@@ -47,6 +47,7 @@ public:
         size_t gemm_mlp_count = 0;
         size_t kv_cache_count = 0;
         size_t activation_count = 0;
+        size_t communication_count = 0;
         size_t total = window.size();
 
         // Track shape info for prefill/decode inference
@@ -72,14 +73,24 @@ public:
                 kv_cache_count++;
             } else if (isActivationOp(entry.op_type)) {
                 activation_count++;
+            } else if (isCommunicationOp(entry.op_type)) {
+                communication_count++;
             }
         }
 
         float attention_ratio = static_cast<float>(attention_count) / total;
         float gemm_mlp_ratio = static_cast<float>(gemm_mlp_count + activation_count) / total;
         float kv_cache_ratio = static_cast<float>(kv_cache_count) / total;
+        float communication_ratio = static_cast<float>(communication_count) / total;
 
         // --- Phase classification ---
+
+        // Communication phase (collective communication dominates recent ops)
+        if (communication_ratio >= config_.gemm_mlp_threshold
+            && communication_ratio >= attention_ratio
+            && communication_ratio >= gemm_mlp_ratio) {
+            return PhaseType::COMMUNICATION;
+        }
 
         // KV cache phase (high KV cache op ratio)
         if (kv_cache_ratio >= config_.kv_cache_threshold) {

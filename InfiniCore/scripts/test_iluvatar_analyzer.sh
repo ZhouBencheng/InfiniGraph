@@ -83,7 +83,7 @@ echo ""
 echo "--- Step 2: 构建 ---"
 
 echo "  配置 xmake ..."
-xmake f --iluvatar-gpu=y --mutual-awareness=y -c 2>&1 | tail -3
+xmake f --iluvatar-gpu=y --mutual-awareness=y --ccl=y -c -y
 echo ""
 
 echo "  构建 infinirt-test-analyzer-hw ..."
@@ -105,6 +105,16 @@ fi
 
 echo ""
 
+echo "  构建 analyzer-demo ..."
+if xmake build analyzer-demo 2>&1; then
+    pass "analyzer-demo 构建成功"
+else
+    fail "analyzer-demo 构建失败"
+    exit 1
+fi
+
+echo ""
+
 # ---- Step 3: 运行硬件层测试 ----
 echo "--- Step 3: 运行硬件层测试 ---"
 echo ""
@@ -119,8 +129,23 @@ fi
 
 echo ""
 
-# ---- Step 4: 运行 analyzer 单元测试 ----
-echo "--- Step 4: 运行 analyzer 单元测试 ---"
+# ---- Step 4: 运行真实输出 demo ----
+echo "--- Step 4: 运行真实输出 demo ---"
+echo ""
+xmake run analyzer-demo
+DEMO_EXIT=$?
+echo ""
+if [ $DEMO_EXIT -eq 0 ]; then
+    pass "真实 analyzer-demo 运行通过"
+else
+    fail "真实 analyzer-demo 运行失败 (exit code: $DEMO_EXIT)"
+    exit $DEMO_EXIT
+fi
+
+echo ""
+
+# ---- Step 5: 运行 analyzer 单元测试 ----
+echo "--- Step 5: 运行 analyzer 单元测试 ---"
 echo ""
 if xmake run analyzer-test 2>&1; then
     ANALYZER_EXIT=$?
