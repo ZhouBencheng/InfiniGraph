@@ -19,6 +19,13 @@ NC='\033[0m'
 pass() { echo -e "  ${GREEN}OK${NC}: $1"; }
 fail() { echo -e "  ${RED}FAIL${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
+symbol_count() {
+    local lib="$1"
+    local symbol="$2"
+    local symbols
+    symbols=$(nm -D "$lib" 2>/dev/null || true)
+    printf '%s\n' "$symbols" | awk -v sym="$symbol" 'index($0, sym) > 0 { count++ } END { print count + 0 }'
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -77,22 +84,71 @@ if [ -n "$MXSML_PATH" ]; then
     pass "libmxsml.so: $MXSML_PATH"
     export LD_LIBRARY_PATH="$(dirname "$MXSML_PATH"):${LD_LIBRARY_PATH:-}"
 
-    MXSML_INIT=$(nm -D "$MXSML_PATH" 2>/dev/null | grep -c "mxSmlExInit" || echo 0)
-    MXSML_HANDLE=$(nm -D "$MXSML_PATH" 2>/dev/null | grep -c "mxSmlExGetDeviceHandleByIndex" || echo 0)
-    MXSML_UTIL=$(nm -D "$MXSML_PATH" 2>/dev/null | grep -c "mxSmlExDeviceGetUtilization" || echo 0)
-    MXSML_MEM=$(nm -D "$MXSML_PATH" 2>/dev/null | grep -c "mxSmlExDeviceGetMemoryInfo" || echo 0)
+    MXSML_INIT=$(symbol_count "$MXSML_PATH" "mxSmlExInit")
+    MXSML_HANDLE=$(symbol_count "$MXSML_PATH" "mxSmlExGetDeviceHandleByIndex")
+    MXSML_UTIL=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetUtilization")
+    MXSML_MEM=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetMemoryInfo")
+    MXSML_PCIE=$(symbol_count "$MXSML_PATH" "mxSmlExGetPcieThroughput")
+    MXSML_POWER=$(symbol_count "$MXSML_PATH" "mxSmlExGetPowerUsage")
+    MXSML_TEMP=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetTemperature")
+    MXSML_PROC=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetComputeRunningProcesses")
+    MXSML_FIELDS=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetFieldValues")
 
-    echo "  符号检查:"
+    echo "  MXSML extension 符号检查:"
     echo "    mxSmlExInit:                   $MXSML_INIT"
     echo "    mxSmlExGetDeviceHandleByIndex: $MXSML_HANDLE"
     echo "    mxSmlExDeviceGetUtilization:   $MXSML_UTIL"
     echo "    mxSmlExDeviceGetMemoryInfo:    $MXSML_MEM"
+    echo "    mxSmlExGetPcieThroughput:      $MXSML_PCIE"
+    echo "    mxSmlExGetPowerUsage:          $MXSML_POWER"
+    echo "    mxSmlExDeviceGetTemperature:   $MXSML_TEMP"
+    echo "    mxSmlExDeviceGetProcesses:     $MXSML_PROC"
+    echo "    mxSmlExDeviceGetFieldValues:   $MXSML_FIELDS"
 
     if [ "$MXSML_INIT" -gt 0 ] && [ "$MXSML_HANDLE" -gt 0 ] && \
        [ "$MXSML_UTIL" -gt 0 ] && [ "$MXSML_MEM" -gt 0 ]; then
         pass "MXSML 扩展资源符号完整"
     else
         warn "MXSML 扩展符号不完整；utilization / memory 快照可能降级"
+    fi
+
+    if [ "$MXSML_PCIE" -gt 0 ] && [ "$MXSML_POWER" -gt 0 ] && \
+       [ "$MXSML_TEMP" -gt 0 ] && [ "$MXSML_PROC" -gt 0 ] && [ "$MXSML_FIELDS" -gt 0 ]; then
+        pass "MXSML extension 增强监控符号完整"
+    else
+        warn "MXSML extension 增强监控符号不完整；PCIe / power / temperature / process 仅作为可选增强"
+    fi
+
+    MXSML_BASE_MEM=$(symbol_count "$MXSML_PATH" "mxSmlGetMemoryInfo")
+    MXSML_BASE_HBM=$(symbol_count "$MXSML_PATH" "mxSmlGetHbmBandWidth")
+    MXSML_BASE_DMA=$(symbol_count "$MXSML_PATH" "mxSmlGetDmaBandwidth")
+    MXSML_BASE_PCIE=$(symbol_count "$MXSML_PATH" "mxSmlGetPcieThroughput")
+    MXSML_BASE_MXLK_BW=$(symbol_count "$MXSML_PATH" "mxSmlGetMetaXLinkBandwidth")
+    MXSML_BASE_MXLK_STAT=$(symbol_count "$MXSML_PATH" "mxSmlGetMetaXLinkTrafficStat")
+    MXSML_BASE_PROC_NUM=$(symbol_count "$MXSML_PATH" "mxSmlGetNumberOfProcess")
+    MXSML_BASE_PROC=$(symbol_count "$MXSML_PATH" "mxSmlGetProcessInfo")
+    MXSML_BASE_TOPO=$(symbol_count "$MXSML_PATH" "mxSmlGetDeviceTopology")
+    MXSML_BASE_IP_USAGE=$(symbol_count "$MXSML_PATH" "mxSmlGetDeviceIpUsage")
+    MXSML_BASE_XCORE=$(symbol_count "$MXSML_PATH" "mxSmlGetXcoreApUsage")
+
+    echo "  MXSML base 高阶资源符号检查:"
+    echo "    mxSmlGetMemoryInfo:            $MXSML_BASE_MEM"
+    echo "    mxSmlGetHbmBandWidth:          $MXSML_BASE_HBM"
+    echo "    mxSmlGetDmaBandwidth:          $MXSML_BASE_DMA"
+    echo "    mxSmlGetPcieThroughput:        $MXSML_BASE_PCIE"
+    echo "    mxSmlGetMetaXLinkBandwidth:    $MXSML_BASE_MXLK_BW"
+    echo "    mxSmlGetMetaXLinkTrafficStat:  $MXSML_BASE_MXLK_STAT"
+    echo "    mxSmlGetNumberOfProcess:       $MXSML_BASE_PROC_NUM"
+    echo "    mxSmlGetProcessInfo*:          $MXSML_BASE_PROC"
+    echo "    mxSmlGetDeviceTopology:        $MXSML_BASE_TOPO"
+    echo "    mxSmlGetDeviceIpUsage:         $MXSML_BASE_IP_USAGE"
+    echo "    mxSmlGetXcoreApUsage:          $MXSML_BASE_XCORE"
+
+    if [ "$MXSML_BASE_HBM" -gt 0 ] && [ "$MXSML_BASE_DMA" -gt 0 ] && \
+       [ "$MXSML_BASE_MXLK_BW" -gt 0 ]; then
+        pass "MXSML base 可用于后续 HBM / DMA / MetaXLink 增强采样"
+    else
+        warn "MXSML base 高阶带宽符号不完整；当前主线仍使用 extension"
     fi
 else
     warn "libmxsml.so 未找到；将只能依赖 hcMemGetInfo 和事件通信采样"

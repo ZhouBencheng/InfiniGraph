@@ -21,13 +21,25 @@
 - 事件计时：`cudaEventCreate`、`cudaEventRecord`、`cudaEventQuery`、`cudaEventElapsedTime`。
 - 通信采样：`infiniccl` AllReduce 前后插入事件，完成后进入最近 1s 窗口统计。
 
-管理库侧使用 CoreX IXML。公开 Go binding `deep-spark/go-ixml` 的 `api.h` 显示 IXML 提供 NVML-compatible API：
+管理库侧当前实现使用 CoreX IXML。公开 Go binding `deep-spark/go-ixml` 的 `api.h` 显示 IXML 提供 NVML-compatible API：
 
 - `nvmlInit_v2`
 - `nvmlDeviceGetHandleByIndex_v2`
 - `nvmlDeviceGetUtilizationRates`
 - `nvmlDeviceGetMemoryInfo`
 - `nvmlDeviceGetPcieThroughput`
+- `nvmlDeviceGetPowerUsage`
+- `nvmlDeviceGetTemperature`
+
+第二轮 API 搜索还确认了天数侧存在更完整的 IXDCGM 管理栈。公开 Go binding `deep-spark/go-ixdcgm` 说明 IXDCGM 需要 `libixdcgm.so` 和 IXDCGM SDK，并支持三种 hostengine 模式：Embedded、Standalone、StartHostengine。它不是第三个平台，而是 BI-V150 / CoreX 的另一条资源感知接口线，适合后续增强更细的诊断字段：
+
+- `ixdcgm.Init(ixdcgm.Embedded)` / `dcgmInit` / hostengine 连接。
+- `ixdcgm.GetDeviceStatus(gpuId)`：power、temperature、GPU utilization、memory utilization、PCIe Tx/Rx throughput、PCIe replay counter、显存 total/used/free。
+- `ixdcgm.GetDeviceProfStatus(gpuId)`：`SmActive`、`SmOccupancy`、`DramActive`。
+- `ixdcgm.GetDeviceRunningProcesses(gpuId)`：进程级 GPU 显存占用。
+- DCGM-like field ID 包括 `DCGM_FI_DEV_GPU_UTIL`、`DCGM_FI_DEV_MEM_COPY_UTIL`、`DCGM_FI_DEV_PCIE_TX_THROUGHPUT`、`DCGM_FI_DEV_PCIE_RX_THROUGHPUT`、`DCGM_FI_PROF_SM_ACTIVE`、`DCGM_FI_PROF_DRAM_ACTIVE`、`DCGM_FI_PROF_PCIE_TX_BYTES`、`DCGM_FI_PROF_PCIE_RX_BYTES`。
+
+当前主线优先选择 IXML，是因为它不要求 hostengine，并且已经覆盖 memory / compute utilization / PCIe throughput 这些 analyzer 的核心字段；IXDCGM 应作为目标机验证后的增强路径，用于补全 SM/Dram active、进程和诊断类指标。
 
 运行命令侧主要使用 `ixsmi` 验证设备、驱动和实时利用率。
 
@@ -39,13 +51,33 @@
 - 事件计时：`hcEventCreate`、`hcEventRecord`、`hcEventQuery`、`hcEventElapsedTime`。
 - 通信采样：`hcclAllReduce` 前后插入 `hcEvent_t`，完成后进入最近 1s 窗口统计。
 
-管理库侧使用 MXSML。公开 Go binding `MetaX-MACA/go-mxsml` 的 `MxSmlExtension.h` 显示扩展 API：
+管理库侧当前实现使用 MXSML extension。公开 Go binding `MetaX-MACA/go-mxsml` 的 `MxSmlExtension.h` 显示扩展 API：
 
 - `mxSmlExInit`
 - `mxSmlExGetDeviceHandleByIndex`
 - `mxSmlExDeviceGetUtilization`
 - `mxSmlExDeviceGetMemoryInfo`
 - `mxSmlExGetPcieThroughput`
+- `mxSmlExGetPowerUsage`
+- `mxSmlExDeviceGetTemperature`
+- `mxSmlExDeviceGetComputeRunningProcesses`
+- `mxSmlExDeviceGetFieldValues`
+
+同一个公开 binding 还提供 base MXSML 接口 `pkg/mxsml`。这组接口比 extension 更贴近 `mx-smi`/设备管理原始结构，适合作为 MetaX 后续增强的资源带宽和互联指标来源：
+
+- `MxSmlGetMemoryInfo`
+- `MxSmlGetHbmBandWidth`
+- `MxSmlGetDmaBandwidth`
+- `MxSmlGetPcieThroughput`
+- `MxSmlGetMetaXLinkBandwidth`
+- `MxSmlGetMetaXLinkTrafficStat`
+- `MxSmlGetNumberOfProcess`
+- `MxSmlGetProcessInfo`
+- `MxSmlGetDeviceTopology`
+- `MxSmlGetDeviceIpUsage`
+- `MxSmlGetXcoreApUsage`
+
+当前主线优先选择 MXSML extension，是因为它提供接近 NVML 风格的 device handle、utilization、memory、PCIe throughput，映射到现有 `DeviceResourceSnapshot` 最直接；base MXSML 应作为目标机验证后的增强路径，用于补全 HBM/DMA/MetaXLink、进程和更细粒度 IP 使用率。
 
 实现中按以下顺序 `dlopen`：
 
@@ -105,6 +137,10 @@ BI-V150 目标机：
 
 ```bash
 cd InfiniCore
+which ixsmi
+ixsmi -L
+ixsmi
+find /usr/local/corex* -name 'libixml.so*' -o -name 'libixdcgm.so*'
 bash scripts/test_iluvatar_analyzer.sh
 python3 scripts/analyzer_demo.py --configure iluvatar
 ```
@@ -113,6 +149,9 @@ MetaX 目标机：
 
 ```bash
 cd InfiniCore
+which mx-smi
+mx-smi
+find /opt/mxdriver /opt/maca /opt/mxn100 -name 'libmxsml.so*'
 bash scripts/test_metax_analyzer.sh
 python3 scripts/analyzer_demo.py --configure metax
 ```
@@ -132,8 +171,34 @@ python3 scripts/analyzer_demo.py --configure metax --extra-config --use-mc=y
 - 通信占比来自最近 1s 内已完成的 AllReduce event sample；没有通信或事件未完成时，通信字节为 0。
 - analyzer 输出会根据 valid bits 计算 `resource_confidence`，不会把缺失的管理库字段当成真实 0 利用率。
 
+## 目标机到手后的快速判定
+
+### 天数 BI-V150
+
+1. `ixsmi -L` 确认卡可见；`ixsmi` 看实时利用率是否有非零字段。
+2. `scripts/test_iluvatar_analyzer.sh` 会检查核心 IXML 符号：
+   - 必需：`nvmlInit_v2`、`nvmlDeviceGetHandleByIndex_v2`、`nvmlDeviceGetUtilizationRates`、`nvmlDeviceGetMemoryInfo`、`nvmlShutdown`。
+   - 增强：`nvmlDeviceGetPcieThroughput`、`nvmlDeviceGetPowerUsage`、`nvmlDeviceGetTemperature`。
+3. 如果存在 `libixdcgm.so`，脚本会额外探测 IXDCGM / DCGM-like 符号：
+   - 初始化/连接：`dcgmInit`、`dcgmShutdown`、`dcgmStartEmbedded`、`dcgmConnect`。
+   - 指标：`dcgmGetLatestValuesForFields`、`dcgmWatchFields`、`dcgmGetDeviceAttributes`。
+4. 当前实现验证看 `infinirt-test-analyzer-hw` 与 `analyzer-demo` 输出；IXDCGM 字段暂作为增强候选，不影响主线通过/失败。
+
+### 沐曦 MetaX
+
+1. `mx-smi` 确认驱动、设备、利用率和显存字段可见。
+2. `scripts/test_metax_analyzer.sh` 会检查核心 MXSML extension 符号：
+   - 必需：`mxSmlExInit`、`mxSmlExGetDeviceHandleByIndex`、`mxSmlExDeviceGetUtilization`、`mxSmlExDeviceGetMemoryInfo`。
+   - 增强：`mxSmlExGetPcieThroughput`、`mxSmlExGetPowerUsage`、`mxSmlExDeviceGetTemperature`、`mxSmlExDeviceGetComputeRunningProcesses`、`mxSmlExDeviceGetFieldValues`。
+3. 同一个 `libmxsml.so` 还会检查 base MXSML 高阶字段：
+   - `MxSmlGetMemoryInfo`、`MxSmlGetHbmBandWidth`、`MxSmlGetDmaBandwidth`、`MxSmlGetPcieThroughput`。
+   - `MxSmlGetMetaXLinkBandwidth`、`MxSmlGetMetaXLinkTrafficStat`。
+   - `MxSmlGetNumberOfProcess`、`MxSmlGetProcessInfo`、`MxSmlGetDeviceTopology`。
+4. 当前实现验证仍看 extension utilization/memory、HCCL communication sampling 和 analyzer demo；base MXSML 高阶字段暂作为增强候选。
+
 ## 资料来源
 
 - IXML / NVML-compatible API: https://gitee.com/deep-spark/go-ixml
-- MXSML extension API: https://github.com/MetaX-MACA/go-mxsml
+- IXDCGM / DCGM-like API: https://gitee.com/deep-spark/go-ixdcgm
+- MXSML extension / base API: https://github.com/MetaX-MACA/go-mxsml
 - MetaX 部署与 `mx-smi` 现场工具参考: https://docs.opencloudos.org/en/OC9/ai-deployment/GPU-optimization-practice/metax-deployment/
