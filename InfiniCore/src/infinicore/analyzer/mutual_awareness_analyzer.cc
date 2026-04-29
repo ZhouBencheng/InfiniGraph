@@ -77,9 +77,29 @@ DeviceResourceSnapshot buildSnapshotFromInfinirt(
 
 std::vector<DeviceResourceSnapshot> collectRuntimeResourceSnapshots() {
     std::vector<DeviceResourceSnapshot> device_snapshots;
-    // TODO: integrate with ContextImpl allocator stats when available.
-    // For now, return an empty snapshot list; the analyzer will use
-    // the fallback path that queries infinirt directly.
+
+    // Enumerate every accelerator type known to infinirt and build a
+    // snapshot per (device_type, device_id). CPU is intentionally skipped
+    // because the analyzer focuses on accelerator resource awareness.
+    int counts[INFINI_DEVICE_TYPE_COUNT] = {0};
+    if (infinirtGetAllDeviceCount(counts) != INFINI_STATUS_SUCCESS) {
+        return device_snapshots;
+    }
+
+    MemoryStats empty_allocator_stats{};
+    for (int dt = 0; dt < INFINI_DEVICE_TYPE_COUNT; ++dt) {
+        if (dt == INFINI_DEVICE_CPU) {
+            continue;
+        }
+        for (int dev_id = 0; dev_id < counts[dt]; ++dev_id) {
+            infinicore::Device device(
+                static_cast<infinicore::Device::Type>(dt),
+                static_cast<infinicore::Device::Index>(dev_id));
+            device_snapshots.push_back(
+                buildSnapshotFromInfinirt(device, empty_allocator_stats));
+        }
+    }
+
     return device_snapshots;
 }
 

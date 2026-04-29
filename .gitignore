@@ -41,3 +41,5 @@ cache/
 *.http
 
 *.nsys-rep
+.omx/
+.omc/
