@@ -1,8 +1,8 @@
 // ============================================================
-// Hardware-level analyzer tests for Iluvatar (and NVIDIA) backends
+// Hardware-level analyzer tests for Iluvatar, MetaX, and NVIDIA backends
 //
 // Verifies the infinirt layer: getMemInfo, getDeviceResourceSnapshot,
-// event timing, and management library (NVML/IXML) loading.
+// event timing, and management library (NVML/IXML/MXSML) loading.
 //
 // Build & run:
 //   xmake build infinirt-test-analyzer-hw
@@ -40,7 +40,7 @@ static infiniDevice_t g_device_type = INFINI_DEVICE_CPU;
 static int g_device_count = 0;
 
 static void detectDevice() {
-    infiniDevice_t try_types[] = {INFINI_DEVICE_ILUVATAR, INFINI_DEVICE_NVIDIA};
+    infiniDevice_t try_types[] = {INFINI_DEVICE_ILUVATAR, INFINI_DEVICE_METAX, INFINI_DEVICE_NVIDIA};
     for (auto dt : try_types) {
         int count = 0;
         if (infinirtGetDeviceCount(dt, &count) == INFINI_STATUS_SUCCESS && count > 0) {
@@ -55,6 +55,7 @@ static const char *deviceTypeName(infiniDevice_t dt) {
     switch (dt) {
     case INFINI_DEVICE_NVIDIA: return "NVIDIA";
     case INFINI_DEVICE_ILUVATAR: return "Iluvatar";
+    case INFINI_DEVICE_METAX: return "MetaX";
     default: return "Unknown";
     }
 }
@@ -108,7 +109,7 @@ static bool test_snapshot_memory() {
 }
 
 // ============================================================
-// Test 3: getDeviceResourceSnapshot — utilization (NVML/IXML)
+// Test 3: getDeviceResourceSnapshot — utilization (NVML/IXML/MXSML)
 // ============================================================
 
 static bool test_snapshot_utilization() {
@@ -121,7 +122,7 @@ static bool test_snapshot_utilization() {
     bool has_bw = (snap.valid_fields & INFINIRT_RESOURCE_FIELD_MEMORY_BANDWIDTH_UTILIZATION) != 0;
 
     if (!has_compute || !has_bw) {
-        printf("(utilization unavailable — NVML/IXML not loaded? compute=%s, bw=%s) ",
+        printf("(utilization unavailable — NVML/IXML/MXSML not loaded? compute=%s, bw=%s) ",
                has_compute ? "yes" : "no", has_bw ? "yes" : "no");
         return false;
     }

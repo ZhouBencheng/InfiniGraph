@@ -1,6 +1,15 @@
 #include "infinirt_metax.h"
 #include "../../utils.h"
+#include <chrono>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
+
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
+
 #ifdef ENABLE_METAX_MC_API
 #include <mcr/mc_runtime.h>
 #include <mcr/mc_runtime_api.h>
@@ -10,6 +19,280 @@
 #endif
 
 #define CHECK_MACART(RT_API) CHECK_INTERNAL(RT_API, hcSuccess)
+
+namespace {
+
+struct PendingCommunicationSample {
+    hcEvent_t start_event = nullptr;
+    hcEvent_t end_event = nullptr;
+    uint64_t bytes = 0;
+};
+
+struct CompletedCommunicationSample {
+    std::chrono::steady_clock::time_point completed_at;
+    double duration_ms = 0.0;
+    uint64_t bytes = 0;
+};
+
+struct DeviceCommunicationState {
+    std::deque<PendingCommunicationSample> pending;
+    std::deque<CompletedCommunicationSample> recent;
+};
+
+struct CommunicationStatsStore {
+    std::mutex mutex;
+    std::unordered_map<int, DeviceCommunicationState> per_device;
+};
+
+CommunicationStatsStore &communicationStatsStore() {
+    static CommunicationStatsStore store;
+    return store;
+}
+
+constexpr auto kCommunicationWindow = std::chrono::seconds(1);
+
+void destroyCommunicationSample(const PendingCommunicationSample &sample) {
+    if (sample.start_event != nullptr) {
+        hcEventDestroy(sample.start_event);
+    }
+    if (sample.end_event != nullptr) {
+        hcEventDestroy(sample.end_event);
+    }
+}
+
+template <typename DeviceFn>
+hcError_t withDeviceGuard(int device_id, DeviceFn &&fn) {
+    int previous_device = 0;
+    auto status = hcGetDevice(&previous_device);
+    if (status != hcSuccess) {
+        return status;
+    }
+
+    if (previous_device != device_id) {
+        status = hcSetDevice(device_id);
+        if (status != hcSuccess) {
+            return status;
+        }
+    }
+
+    auto fn_status = fn();
+
+    if (previous_device != device_id) {
+        auto restore_status = hcSetDevice(previous_device);
+        if (fn_status == hcSuccess && restore_status != hcSuccess) {
+            fn_status = restore_status;
+        }
+    }
+    return fn_status;
+}
+
+void pruneCommunicationWindow(DeviceCommunicationState &state, std::chrono::steady_clock::time_point now) {
+    while (!state.recent.empty() && now - state.recent.front().completed_at > kCommunicationWindow) {
+        state.recent.pop_front();
+    }
+}
+
+void flushCompletedCommunicationSamples(int device_id, DeviceCommunicationState &state) {
+    std::deque<PendingCommunicationSample> remaining;
+
+    auto status = withDeviceGuard(device_id, [&]() {
+        for (auto &sample : state.pending) {
+            auto query_status = hcEventQuery(sample.end_event);
+            if (query_status == hcSuccess) {
+                float elapsed_ms = 0.0f;
+                auto elapsed_status = hcEventElapsedTime(&elapsed_ms, sample.start_event, sample.end_event);
+                if (elapsed_status == hcSuccess) {
+                    state.recent.push_back({
+                        std::chrono::steady_clock::now(),
+                        static_cast<double>(elapsed_ms),
+                        sample.bytes});
+                }
+                destroyCommunicationSample(sample);
+            } else {
+                remaining.push_back(sample);
+            }
+        }
+        return hcSuccess;
+    });
+
+    if (status == hcSuccess) {
+        state.pending.swap(remaining);
+    }
+}
+
+void populateCommunicationSnapshot(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &store = communicationStatsStore();
+    std::lock_guard<std::mutex> lock(store.mutex);
+    auto &state = store.per_device[device_id];
+
+    flushCompletedCommunicationSamples(device_id, state);
+    auto now = std::chrono::steady_clock::now();
+    pruneCommunicationWindow(state, now);
+
+    double total_comm_ms = 0.0;
+    uint64_t total_comm_bytes = 0;
+    for (auto const &sample : state.recent) {
+        total_comm_ms += sample.duration_ms;
+        total_comm_bytes += sample.bytes;
+    }
+
+    double window_ms = std::chrono::duration<double, std::milli>(kCommunicationWindow).count();
+    double ratio = total_comm_ms / window_ms;
+    snapshot->communication_bytes = total_comm_bytes;
+    snapshot->communication_time_ratio = static_cast<float>(ratio > 1.0 ? 1.0 : ratio);
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_COMMUNICATION;
+}
+
+#if !defined(_WIN32)
+using MxsmlReturn = int;
+using MxsmlDevice = void *;
+
+struct MxsmlExUtilization {
+    unsigned int gpu = 0;
+    unsigned int memory = 0;
+};
+
+struct MxsmlExMemory {
+    unsigned long long free = 0;
+    unsigned long long total = 0;
+    unsigned long long used = 0;
+};
+
+constexpr MxsmlReturn MXSML_SUCCESS = 0;
+
+using MxsmlExInitFn = MxsmlReturn (*)();
+using MxsmlExShutdownFn = MxsmlReturn (*)();
+using MxsmlExGetDeviceHandleByIndexFn = MxsmlReturn (*)(unsigned int, MxsmlDevice *);
+using MxsmlExDeviceGetUtilizationFn = MxsmlReturn (*)(MxsmlDevice, MxsmlExUtilization *);
+using MxsmlExDeviceGetMemoryInfoFn = MxsmlReturn (*)(MxsmlDevice, MxsmlExMemory *);
+
+struct MxsmlApi {
+    void *handle = nullptr;
+    MxsmlExInitFn init = nullptr;
+    MxsmlExShutdownFn shutdown = nullptr;
+    MxsmlExGetDeviceHandleByIndexFn get_handle_by_index = nullptr;
+    MxsmlExDeviceGetUtilizationFn get_utilization = nullptr;
+    MxsmlExDeviceGetMemoryInfoFn get_memory_info = nullptr;
+    bool available = false;
+    bool initialized = false;
+};
+
+MxsmlApi &mxsmlApi() {
+    static MxsmlApi api = []() {
+        MxsmlApi loaded;
+        const char *candidates[] = {
+            "libmxsml.so",
+            "/opt/mxdriver/lib/libmxsml.so",
+            "/opt/maca/lib/libmxsml.so",
+            "/opt/mxn100/lib/libmxsml.so",
+        };
+
+        for (auto candidate : candidates) {
+            loaded.handle = dlopen(candidate, RTLD_LAZY | RTLD_LOCAL);
+            if (loaded.handle != nullptr) {
+                break;
+            }
+        }
+
+        if (loaded.handle == nullptr) {
+            return loaded;
+        }
+
+        loaded.init = reinterpret_cast<MxsmlExInitFn>(dlsym(loaded.handle, "mxSmlExInit"));
+        loaded.shutdown = reinterpret_cast<MxsmlExShutdownFn>(dlsym(loaded.handle, "mxSmlExShutdown"));
+        loaded.get_handle_by_index = reinterpret_cast<MxsmlExGetDeviceHandleByIndexFn>(dlsym(loaded.handle, "mxSmlExGetDeviceHandleByIndex"));
+        loaded.get_utilization = reinterpret_cast<MxsmlExDeviceGetUtilizationFn>(dlsym(loaded.handle, "mxSmlExDeviceGetUtilization"));
+        loaded.get_memory_info = reinterpret_cast<MxsmlExDeviceGetMemoryInfoFn>(dlsym(loaded.handle, "mxSmlExDeviceGetMemoryInfo"));
+
+        loaded.available = loaded.init != nullptr
+                           && loaded.get_handle_by_index != nullptr
+                           && (loaded.get_utilization != nullptr || loaded.get_memory_info != nullptr);
+        return loaded;
+    }();
+    return api;
+}
+
+bool ensureMxsmlInitialized(MxsmlApi &api) {
+    if (!api.available) {
+        return false;
+    }
+
+    if (!api.initialized) {
+        if (api.init() != MXSML_SUCCESS) {
+            return false;
+        }
+        api.initialized = true;
+    }
+    return true;
+}
+
+bool getMxsmlDevice(int device_id, MxsmlDevice *device) {
+    auto &api = mxsmlApi();
+    if (device == nullptr || !ensureMxsmlInitialized(api)) {
+        return false;
+    }
+    return api.get_handle_by_index(static_cast<unsigned int>(device_id), device) == MXSML_SUCCESS;
+}
+
+bool tryPopulateMxsmlMemory(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &api = mxsmlApi();
+    if (api.get_memory_info == nullptr) {
+        return false;
+    }
+
+    MxsmlDevice device = nullptr;
+    if (!getMxsmlDevice(device_id, &device)) {
+        return false;
+    }
+
+    MxsmlExMemory memory{};
+    if (api.get_memory_info(device, &memory) != MXSML_SUCCESS || memory.total == 0) {
+        return false;
+    }
+
+    snapshot->free_bytes = static_cast<size_t>(memory.free);
+    snapshot->total_bytes = static_cast<size_t>(memory.total);
+    snapshot->used_bytes = static_cast<size_t>(memory.used);
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY;
+    return true;
+}
+
+bool tryPopulateMxsmlUtilization(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &api = mxsmlApi();
+    if (api.get_utilization == nullptr) {
+        return false;
+    }
+
+    MxsmlDevice device = nullptr;
+    if (!getMxsmlDevice(device_id, &device)) {
+        return false;
+    }
+
+    MxsmlExUtilization util{};
+    if (api.get_utilization(device, &util) != MXSML_SUCCESS) {
+        return false;
+    }
+
+    snapshot->compute_utilization = static_cast<float>(util.gpu) / 100.0f;
+    snapshot->memory_bandwidth_utilization = static_cast<float>(util.memory) / 100.0f;
+    snapshot->kernel_time_ratio = snapshot->compute_utilization;
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_COMPUTE_UTILIZATION
+                              | INFINIRT_RESOURCE_FIELD_MEMORY_BANDWIDTH_UTILIZATION
+                              | INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO;
+    snapshot->estimated_fields |= INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO;
+    return true;
+}
+#else
+bool tryPopulateMxsmlMemory(int, infinirtDeviceResourceSnapshot_t *) {
+    return false;
+}
+
+bool tryPopulateMxsmlUtilization(int, infinirtDeviceResourceSnapshot_t *) {
+    return false;
+}
+#endif
+
+} // namespace
 
 namespace infinirt::metax {
 infiniStatus_t getDeviceCount(int *count) {
@@ -80,7 +363,13 @@ infiniStatus_t eventRecord(infinirtEvent_t event, infinirtStream_t stream) {
 }
 
 infiniStatus_t eventQuery(infinirtEvent_t event, infinirtEventStatus_t *status_ptr) {
-    CHECK_MACART(hcEventQuery((hcEvent_t)event));
+    if (status_ptr == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    auto status = hcEventQuery((hcEvent_t)event);
+    *status_ptr = status == hcSuccess
+        ? INFINIRT_EVENT_COMPLETE
+        : INFINIRT_EVENT_NOT_READY;
     return INFINI_STATUS_SUCCESS;
 }
 
@@ -138,16 +427,43 @@ infiniStatus_t getDeviceResourceSnapshot(int device_id, infinirtDeviceResourceSn
     snapshot->device_type = INFINI_DEVICE_METAX;
 
     auto status = getMemInfo(device_id, &snapshot->free_bytes, &snapshot->total_bytes);
-    if (status != INFINI_STATUS_SUCCESS) {
+    if (status == INFINI_STATUS_SUCCESS && snapshot->total_bytes > 0) {
+        if (snapshot->total_bytes >= snapshot->free_bytes) {
+            snapshot->used_bytes = snapshot->total_bytes - snapshot->free_bytes;
+        }
+        snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY;
+    }
+
+    (void)tryPopulateMxsmlMemory(device_id, snapshot);
+    if (!(snapshot->valid_fields & INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY)) {
         return status;
     }
 
-    if (snapshot->total_bytes >= snapshot->free_bytes) {
-        snapshot->used_bytes = snapshot->total_bytes - snapshot->free_bytes;
-    }
-    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY;
+    (void)tryPopulateMxsmlUtilization(device_id, snapshot);
+    populateCommunicationSnapshot(device_id, snapshot);
 
     return INFINI_STATUS_SUCCESS;
+}
+
+void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes) {
+    if (start_event == nullptr || end_event == nullptr) {
+        return;
+    }
+    if (bytes == 0) {
+        destroyCommunicationSample(PendingCommunicationSample{
+            static_cast<hcEvent_t>(start_event),
+            static_cast<hcEvent_t>(end_event),
+            bytes});
+        return;
+    }
+
+    auto &store = communicationStatsStore();
+    std::lock_guard<std::mutex> lock(store.mutex);
+    store.per_device[device_id].pending.push_back(
+        PendingCommunicationSample{
+            static_cast<hcEvent_t>(start_event),
+            static_cast<hcEvent_t>(end_event),
+            bytes});
 }
 
 infiniStatus_t mallocDevice(void **p_ptr, size_t size) {

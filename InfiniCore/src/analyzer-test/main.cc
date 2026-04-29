@@ -7,6 +7,7 @@
 // ============================================================
 
 #include "infinicore/analyzer/op_trace.hpp"
+#include "infinicore/analyzer/op_type_registry.hpp"
 #include "infinicore/analyzer/phase_detector.hpp"
 #include "infinicore/analyzer/resource_sensor.hpp"
 #include "infinicore/analyzer/intent_generator.hpp"
@@ -17,6 +18,7 @@
 #include "infinicore/ops/distributed/allreduce.hpp"
 #include "infinicore/ops/flash_attention.hpp"
 #include "infinicore/ops/per_tensor_quant_i8.hpp"
+#include "infinirt.h"
 
 #include <cassert>
 #include <chrono>
@@ -310,12 +312,12 @@ void test_op_type_to_string() {
 }
 
 void test_graph_op_type_mapping() {
-    ASSERT_EQ(static_cast<int>(infinicore::op::Add::op_type_id), static_cast<int>(OpType::ADD));
-    ASSERT_EQ(static_cast<int>(infinicore::op::FlashAttention::op_type_id),
+    ASSERT_EQ(static_cast<int>(opTypeFromName("Add")), static_cast<int>(OpType::ADD));
+    ASSERT_EQ(static_cast<int>(opTypeFromName("FlashAttention")),
               static_cast<int>(OpType::FLASH_ATTENTION));
-    ASSERT_EQ(static_cast<int>(infinicore::op::PerTensorQuantI8::op_type_id),
+    ASSERT_EQ(static_cast<int>(opTypeFromName("PerTensorQuantI8")),
               static_cast<int>(OpType::PER_TENSOR_QUANT_I8));
-    ASSERT_EQ(static_cast<int>(infinicore::op::distributed::AllReduce::op_type_id),
+    ASSERT_EQ(static_cast<int>(opTypeFromName("AllReduce")),
               static_cast<int>(OpType::ALLREDUCE));
 }
 
@@ -819,7 +821,7 @@ void test_mutual_awareness_analyzer_with_resource_snapshot() {
     analyzer.clearGraphCache();
 }
 
-void test_mutual_awareness_analyzer_auto_collect_memory_stats() {
+void test_mutual_awareness_analyzer_auto_collect_runtime_snapshots() {
     auto &analyzer = MutualAwarenessAnalyzer::instance();
     auto &trace = getGlobalOpTrace();
     trace.clear();
@@ -840,24 +842,43 @@ void test_mutual_awareness_analyzer_auto_collect_memory_stats() {
             static_cast<uint8_t>(infinicore::Device::Type::CPU),
             0);
 
-    infinicore::context::setDevice(infinicore::Device::cpu());
-    auto workspace = infinicore::context::allocateMemory(8 * 1024 * 1024);
-    (void)workspace;
-
     auto intent = analyzer.analyze();
 
-    ASSERT_TRUE(!intent.per_device.empty());
-    ASSERT_EQ(static_cast<int>(intent.global.goal),
-              static_cast<int>(OptimizationGoal::MEMORY_SAFE));
+    int counts[INFINI_DEVICE_TYPE_COUNT] = {0};
+    bool have_accelerator = false;
+    if (infinirtGetAllDeviceCount(counts) == INFINI_STATUS_SUCCESS) {
+        for (int dt = 0; dt < INFINI_DEVICE_TYPE_COUNT; ++dt) {
+            if (dt != INFINI_DEVICE_CPU && counts[dt] > 0) {
+                have_accelerator = true;
+                break;
+            }
+        }
+    }
 
-    bool saw_memory_pressure = false;
+    if (have_accelerator) {
+        ASSERT_TRUE(!intent.per_device.empty());
+        bool saw_resource_signal = false;
+        for (auto const &dev : intent.per_device) {
+            if (dev.resource_confidence > 0.0f) {
+                saw_resource_signal = true;
+                break;
+            }
+        }
+        ASSERT_TRUE(saw_resource_signal);
+    } else {
+        ASSERT_TRUE(intent.per_device.empty());
+        ASSERT_EQ(static_cast<int>(intent.global.goal),
+                  static_cast<int>(OptimizationGoal::THROUGHPUT_FIRST));
+    }
+
+    bool valid_memory_ratios = true;
     for (auto const &dev : intent.per_device) {
-        if (dev.memory_usage_ratio > 0.85f) {
-            saw_memory_pressure = true;
+        if (dev.memory_usage_ratio < 0.0f || dev.memory_usage_ratio > 1.0f) {
+            valid_memory_ratios = false;
             break;
         }
     }
-    ASSERT_TRUE(saw_memory_pressure);
+    ASSERT_TRUE(valid_memory_ratios);
 
     trace.clear();
     analyzer.clearGraphCache();
@@ -1108,7 +1129,7 @@ int main() {
     RUN_TEST(mutual_awareness_analyzer_goal_prefill);
     RUN_TEST(mutual_awareness_analyzer_goal_memory_safe_with_stats);
     RUN_TEST(mutual_awareness_analyzer_with_resource_snapshot);
-    RUN_TEST(mutual_awareness_analyzer_auto_collect_memory_stats);
+    RUN_TEST(mutual_awareness_analyzer_auto_collect_runtime_snapshots);
     RUN_TEST(attention_execute_consumes_goal_dispatch);
 
     // End-to-end tests

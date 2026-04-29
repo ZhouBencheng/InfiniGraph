@@ -355,7 +355,14 @@ infiniStatus_t getDeviceResourceSnapshot(int device_id, infinirtDeviceResourceSn
 }
 
 void recordCommunicationSample(int device_id, infinirtEvent_t start_event, infinirtEvent_t end_event, uint64_t bytes) {
-    if (start_event == nullptr || end_event == nullptr || bytes == 0) {
+    if (start_event == nullptr || end_event == nullptr) {
+        return;
+    }
+    if (bytes == 0) {
+        destroyCommunicationSample(PendingCommunicationSample{
+            static_cast<cudaEvent_t>(start_event),
+            static_cast<cudaEvent_t>(end_event),
+            bytes});
         return;
     }
 

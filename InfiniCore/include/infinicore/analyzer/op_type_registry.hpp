@@ -31,6 +31,8 @@ inline OpType opTypeFromName(const char *name) {
         // KV Cache
         {"KVCaching",           OpType::KV_CACHING},
         {"PagedCaching",        OpType::PAGED_CACHING},
+        // Communication
+        {"AllReduce",           OpType::ALLREDUCE},
         // Elementwise
         {"Add",                 OpType::ADD},
         {"Mul",                 OpType::MUL},
