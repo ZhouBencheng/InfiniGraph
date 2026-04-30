@@ -122,7 +122,6 @@ MutualAwarenessAnalyzer::MutualAwarenessAnalyzer()
     : phase_detector_(),
       resource_sensor_(),
       intent_generator_(),
-      enabled_(true),
       graph_intent_cached_(false) {
 }
 
@@ -131,7 +130,7 @@ MutualAwarenessAnalyzer::MutualAwarenessAnalyzer()
 // ============================================================
 
 OptimizationIntent MutualAwarenessAnalyzer::analyze() {
-    if (!enabled_) {
+    if (!isEnabled()) {
         return OptimizationIntent{};
     }
 
@@ -169,7 +168,7 @@ OptimizationIntent MutualAwarenessAnalyzer::analyze() {
 OptimizationIntent MutualAwarenessAnalyzer::analyze(
     const std::vector<std::pair<int, MemoryStats>> &device_stats) {
 
-    if (!enabled_) {
+    if (!isEnabled()) {
         return OptimizationIntent{};
     }
 
@@ -207,7 +206,7 @@ OptimizationIntent MutualAwarenessAnalyzer::analyze(
 OptimizationIntent MutualAwarenessAnalyzer::analyze(
     const std::vector<DeviceResourceSnapshot> &device_snapshots) {
 
-    if (!enabled_) {
+    if (!isEnabled()) {
         return OptimizationIntent{};
     }
 
@@ -237,7 +236,7 @@ OptimizationIntent MutualAwarenessAnalyzer::analyze(
 }
 
 PhaseType MutualAwarenessAnalyzer::getCurrentPhase() const {
-    if (!enabled_) {
+    if (!isEnabled()) {
         return PhaseType::UNKNOWN;
     }
 
@@ -257,7 +256,7 @@ const OptimizationIntent &MutualAwarenessAnalyzer::lastIntent() const {
 // ============================================================
 
 void MutualAwarenessAnalyzer::onGraphRecordingStop() {
-    if (!enabled_) return;
+    if (!isEnabled()) return;
 
     // Analyze the op sequence recorded during graph capture
     // and cache the result. Graph ops are static, so we only
@@ -269,6 +268,17 @@ void MutualAwarenessAnalyzer::onGraphRecordingStop() {
 void MutualAwarenessAnalyzer::clearGraphCache() {
     graph_intent_cached_ = false;
     graph_cached_intent_ = OptimizationIntent{};
+}
+
+void MutualAwarenessAnalyzer::setEnabled(bool enabled) {
+    setOpTraceEnabled(enabled);
+    if (!enabled) {
+        clearGraphCache();
+    }
+}
+
+bool MutualAwarenessAnalyzer::isEnabled() const {
+    return isOpTraceEnabled();
 }
 
 // ============================================================
@@ -289,6 +299,10 @@ OptimizationGoal getCurrentOptimizationGoal() {
 
 void setAnalyzerEnabled(bool enabled) {
     MutualAwarenessAnalyzer::instance().setEnabled(enabled);
+}
+
+bool isAnalyzerEnabled() {
+    return MutualAwarenessAnalyzer::instance().isEnabled();
 }
 
 } // namespace infinicore::analyzer

@@ -140,6 +140,12 @@ private:
 /// This is the primary entry point for recording op traces.
 OpTraceRing &getGlobalOpTrace();
 
+/// Runtime gate for production-path tracing.
+/// When disabled, traceOp() is a cheap no-op even if the module was
+/// compiled with ENABLE_MUTUAL_AWARENESS.
+bool isOpTraceEnabled();
+void setOpTraceEnabled(bool enabled);
+
 /// Record an op invocation to the global trace ring.
 /// This is the function called from the INFINICORE_GRAPH_OP_RECORD_OR_RUN
 /// macro hook (when ENABLE_MUTUAL_AWARENESS is defined).
@@ -147,6 +153,10 @@ inline void traceOp(OpType op_type,
                      const size_t *shape, size_t ndim,
                      uint8_t dtype,
                      uint8_t device_type, int8_t device_id) {
+    if (!isOpTraceEnabled()) {
+        return;
+    }
+
     OpTraceEntry entry;
     entry.op_type = op_type;
     entry.setShape(shape, ndim);

@@ -280,6 +280,39 @@ void test_op_trace_records_metadata() {
     trace.clear();
 }
 
+void test_op_trace_runtime_switch() {
+    auto &trace = getGlobalOpTrace();
+    auto &analyzer = MutualAwarenessAnalyzer::instance();
+    trace.clear();
+    analyzer.clearGraphCache();
+
+    analyzer.setEnabled(false);
+    ASSERT_TRUE(!analyzer.isEnabled());
+    ASSERT_TRUE(!isAnalyzerEnabled());
+    traceOp(OpType::GEMM,
+            nullptr,
+            0,
+            static_cast<uint8_t>(infinicore::DataType::F16),
+            static_cast<uint8_t>(infinicore::Device::Type::NVIDIA),
+            0);
+    ASSERT_EQ(trace.size(), 0u);
+    ASSERT_EQ(static_cast<int>(analyzer.analyze().global.current_phase),
+              static_cast<int>(PhaseType::UNKNOWN));
+
+    analyzer.setEnabled(true);
+    ASSERT_TRUE(analyzer.isEnabled());
+    ASSERT_TRUE(isAnalyzerEnabled());
+    traceOp(OpType::GEMM,
+            nullptr,
+            0,
+            static_cast<uint8_t>(infinicore::DataType::F16),
+            static_cast<uint8_t>(infinicore::Device::Type::NVIDIA),
+            0);
+    ASSERT_EQ(trace.size(), 1u);
+
+    trace.clear();
+}
+
 // ============================================================
 // OpType Tests
 // ============================================================
@@ -664,8 +697,20 @@ void test_intent_generator_communication_phase() {
 
 void test_optimization_intent_device_lookup() {
     OptimizationIntent intent;
-    intent.per_device.push_back({0, 0.3f, 700, BottleneckType::COMPUTE_BOUND});
-    intent.per_device.push_back({1, 0.8f, 200, BottleneckType::MEMORY_BOUND});
+    DeviceLocalIntent device0;
+    device0.device_id = 0;
+    device0.memory_usage_ratio = 0.3f;
+    device0.memory_available_bytes = 700;
+    device0.local_bottleneck = BottleneckType::COMPUTE_BOUND;
+
+    DeviceLocalIntent device1;
+    device1.device_id = 1;
+    device1.memory_usage_ratio = 0.8f;
+    device1.memory_available_bytes = 200;
+    device1.local_bottleneck = BottleneckType::MEMORY_BOUND;
+
+    intent.per_device.push_back(device0);
+    intent.per_device.push_back(device1);
 
     ASSERT_TRUE(intent.getDeviceIntent(0) != nullptr);
     ASSERT_TRUE(intent.getDeviceIntent(1) != nullptr);
@@ -1099,6 +1144,7 @@ int main() {
     RUN_TEST(op_trace_entry_shape);
     RUN_TEST(op_trace_global_singleton);
     RUN_TEST(op_trace_records_metadata);
+    RUN_TEST(op_trace_runtime_switch);
 
     // OpType tests
     RUN_TEST(op_type_classification);

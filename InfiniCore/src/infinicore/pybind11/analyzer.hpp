@@ -129,6 +129,8 @@ inline void bind(py::module &m) {
     analyzer_mod.def("set_enabled", &setAnalyzerEnabled,
         "Enable/disable the mutual awareness analyzer",
         py::arg("enabled"));
+    analyzer_mod.def("is_enabled", &isAnalyzerEnabled,
+        "Return whether the mutual awareness analyzer is enabled");
     analyzer_mod.def(
         "trace_op_for_test",
         [](OpType op_type,
