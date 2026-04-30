@@ -10,8 +10,8 @@ __global__ void computeLoadKernel(float *data, size_t n, int rounds) {
     for (size_t i = tid; i < n; i += stride) {
         float x = data[i];
         for (int r = 0; r < rounds; ++r) {
-            x = fmaf(x, 1.000001f, 0.000001f);
-            x = fmaf(x, 0.999999f, 0.000002f);
+            x = x * 1.000001f + 0.000001f;
+            x = x * 0.999999f + 0.000002f;
         }
         data[i] = x;
     }
@@ -19,6 +19,7 @@ __global__ void computeLoadKernel(float *data, size_t n, int rounds) {
 
 } // namespace
 
-extern "C" void analyzerLoadDemoLaunchCompute(float *data, size_t n, int rounds, cudaStream_t stream) {
-    computeLoadKernel<<<4096, 256, 0, stream>>>(data, n, rounds);
+extern "C" void analyzerLoadDemoLaunchCompute(float *data, size_t n, int rounds, void *stream) {
+    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+    computeLoadKernel<<<4096, 256, 0, cuda_stream>>>(data, n, rounds);
 }

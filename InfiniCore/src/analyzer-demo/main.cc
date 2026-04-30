@@ -3,7 +3,7 @@
 //
 // 任务与资源感知分析模块 - 真数据交付演示
 //
-// 该程序用于在目标加速器平台 (天数 BI-V150 / 沐曦 MetaX / NVIDIA)
+// 该程序用于在目标加速器平台 (天数 Iluvatar / 沐曦 MetaX / NVIDIA)
 // 上演示 MutualAwarenessAnalyzer 的真实分析输出:
 //   - 任务模块:  通过 traceOp() 注入 6 类典型 op 序列, 让 PhaseDetector
 //                / IntentGenerator 在真实分析逻辑上跑出 phase / bottleneck.
@@ -44,8 +44,8 @@ struct DetectedDevice {
 static const char *deviceTypeName(infiniDevice_t t) {
     switch (t) {
     case INFINI_DEVICE_NVIDIA:    return "NVIDIA";
-    case INFINI_DEVICE_ILUVATAR:  return "Iluvatar BI-V150";
-    case INFINI_DEVICE_METAX:     return "MetaX C500";
+    case INFINI_DEVICE_ILUVATAR:  return "Iluvatar";
+    case INFINI_DEVICE_METAX:     return "MetaX";
     case INFINI_DEVICE_CAMBRICON: return "Cambricon";
     case INFINI_DEVICE_ASCEND:    return "Ascend";
     case INFINI_DEVICE_MOORE:     return "Moore";

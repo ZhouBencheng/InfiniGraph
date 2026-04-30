@@ -10,8 +10,6 @@
 #include "infinicore/analyzer/op_trace.hpp"
 #include "infinirt.h"
 
-#include <cuda_runtime.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -30,7 +28,9 @@ namespace {
 constexpr size_t MiB = 1024ull * 1024ull;
 constexpr size_t GiB = 1024ull * MiB;
 
-extern "C" void analyzerLoadDemoLaunchCompute(float *data, size_t n, int rounds, cudaStream_t stream);
+#if defined(ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL)
+extern "C" void analyzerLoadDemoLaunchCompute(float *data, size_t n, int rounds, void *stream);
+#endif
 
 struct DetectedDevice {
     infiniDevice_t type = INFINI_DEVICE_CPU;
@@ -40,7 +40,7 @@ struct DetectedDevice {
 
 const char *deviceTypeName(infiniDevice_t t) {
     switch (t) {
-    case INFINI_DEVICE_ILUVATAR: return "Iluvatar BI-V150";
+    case INFINI_DEVICE_ILUVATAR: return "Iluvatar";
     case INFINI_DEVICE_NVIDIA: return "NVIDIA";
     case INFINI_DEVICE_METAX: return "MetaX";
     default: return "CPU";
@@ -50,8 +50,8 @@ const char *deviceTypeName(infiniDevice_t t) {
 DetectedDevice detectAccelerator() {
     infiniDevice_t order[] = {
         INFINI_DEVICE_ILUVATAR,
-        INFINI_DEVICE_NVIDIA,
         INFINI_DEVICE_METAX,
+        INFINI_DEVICE_NVIDIA,
     };
     for (auto t : order) {
         int count = 0;
@@ -162,7 +162,7 @@ std::vector<LoadScenario> buildLoadScenarios() {
         {LoadMode::Idle, "idle", "no artificial GPU load"},
         {LoadMode::MemoryPressure, "memory_pressure", "hold about 88% of device memory"},
         {LoadMode::BandwidthCopy, "bandwidth_copy", "continuous device-to-device memcpy"},
-        {LoadMode::ComputeKernel, "compute_kernel", "continuous CUDA/CoreX arithmetic kernel"},
+        {LoadMode::ComputeKernel, "compute_kernel", "continuous backend arithmetic kernel"},
         {LoadMode::Mixed, "mixed", "memory hold + copy + compute"},
     };
 }
@@ -197,20 +197,22 @@ size_t alignDown(size_t value, size_t alignment) {
     return value / alignment * alignment;
 }
 
-bool cudaOk(cudaError_t err, const char *what) {
-    if (err == cudaSuccess) {
+bool rtOk(infiniStatus_t status, const char *what) {
+    if (status == INFINI_STATUS_SUCCESS) {
         return true;
     }
-    std::fprintf(stderr, "[analyzer-load-demo] %s failed: %s\n", what, cudaGetErrorString(err));
+    std::fprintf(stderr, "[analyzer-load-demo] %s failed: status=%d\n", what, static_cast<int>(status));
     return false;
 }
 
 bool allocateWithBackoff(void **ptr, size_t &bytes) {
+    *ptr = nullptr;
     bytes = alignDown(bytes, MiB);
     while (bytes >= 64 * MiB) {
-        if (cudaMalloc(ptr, bytes) == cudaSuccess) {
+        if (infinirtMalloc(ptr, bytes) == INFINI_STATUS_SUCCESS) {
             return true;
         }
+        *ptr = nullptr;
         bytes /= 2;
         bytes = alignDown(bytes, MiB);
     }
@@ -226,15 +228,12 @@ public:
         if (mode == LoadMode::Idle || device.type == INFINI_DEVICE_CPU) {
             return true;
         }
-        if (device.type != INFINI_DEVICE_ILUVATAR && device.type != INFINI_DEVICE_NVIDIA) {
-            std::fprintf(stderr, "[analyzer-load-demo] load generation is only implemented for CUDA-like backends\n");
-            return false;
-        }
+        device_ = device;
 
-        if (!cudaOk(cudaSetDevice(0), "cudaSetDevice")) {
+        if (!rtOk(infinirtSetDevice(device.type, 0), "infinirtSetDevice")) {
             return false;
         }
-        if (!cudaOk(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreateWithFlags")) {
+        if (!rtOk(infinirtStreamCreate(&stream_), "infinirtStreamCreate")) {
             return false;
         }
 
@@ -249,39 +248,41 @@ public:
             hold_bytes_ = std::min(hold_bytes_, free_bytes > GiB ? free_bytes - GiB : free_bytes / 2);
             if (!allocateWithBackoff(&hold_, hold_bytes_)) {
                 std::fprintf(stderr, "[analyzer-load-demo] memory pressure allocation unavailable\n");
-                hold_bytes_ = 0;
-            } else {
-                cudaMemsetAsync(hold_, 0x5a, hold_bytes_, stream_);
-                cudaStreamSynchronize(stream_);
+                return failStart();
             }
         }
 
         if (mode == LoadMode::BandwidthCopy || mode == LoadMode::Mixed) {
             copy_bytes_ = std::min<size_t>(512 * MiB, free_bytes / 16);
             if (!allocateWithBackoff(&copy_a_, copy_bytes_)) {
-                return false;
+                std::fprintf(stderr, "[analyzer-load-demo] first copy buffer allocation unavailable\n");
+                return failStart();
             }
             size_t second = copy_bytes_;
             if (!allocateWithBackoff(&copy_b_, second)) {
-                return false;
+                std::fprintf(stderr, "[analyzer-load-demo] second copy buffer allocation unavailable\n");
+                return failStart();
             }
             copy_bytes_ = std::min(copy_bytes_, second);
-            cudaMemsetAsync(copy_a_, 1, copy_bytes_, stream_);
-            cudaMemsetAsync(copy_b_, 2, copy_bytes_, stream_);
-            cudaStreamSynchronize(stream_);
         }
 
         if (mode == LoadMode::ComputeKernel || mode == LoadMode::Mixed) {
+#if !defined(ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL)
+            std::fprintf(stderr, "[analyzer-load-demo] compute kernel is not compiled for this backend\n");
+            return failStart();
+#else
             compute_bytes_ = 128 * MiB;
             if (!allocateWithBackoff(&compute_, compute_bytes_)) {
-                return false;
+                std::fprintf(stderr, "[analyzer-load-demo] compute buffer allocation unavailable\n");
+                return failStart();
             }
-            cudaMemsetAsync(compute_, 0, compute_bytes_, stream_);
-            cudaStreamSynchronize(stream_);
+#endif
         }
 
-        running_.store(true);
-        worker_ = std::thread([this]() { this->run(); });
+        if (copy_a_ != nullptr || compute_ != nullptr) {
+            running_.store(true);
+            worker_ = std::thread([this]() { this->run(); });
+        }
         return true;
     }
 
@@ -291,18 +292,18 @@ public:
             worker_.join();
         }
         if (stream_ != nullptr) {
-            cudaStreamSynchronize(stream_);
+            (void)infinirtStreamSynchronize(stream_);
         }
-        if (copy_a_) cudaFree(copy_a_);
-        if (copy_b_) cudaFree(copy_b_);
-        if (compute_) cudaFree(compute_);
-        if (hold_) cudaFree(hold_);
+        if (copy_a_) (void)infinirtFree(copy_a_);
+        if (copy_b_) (void)infinirtFree(copy_b_);
+        if (compute_) (void)infinirtFree(compute_);
+        if (hold_) (void)infinirtFree(hold_);
         copy_a_ = nullptr;
         copy_b_ = nullptr;
         compute_ = nullptr;
         hold_ = nullptr;
         if (stream_ != nullptr) {
-            cudaStreamDestroy(stream_);
+            (void)infinirtStreamDestroy(stream_);
             stream_ = nullptr;
         }
     }
@@ -312,28 +313,37 @@ public:
     size_t computeBytes() const { return compute_bytes_; }
 
 private:
+    bool failStart() {
+        stop();
+        return false;
+    }
+
     void run() {
+        (void)infinirtSetDevice(device_.type, 0);
         int iter = 0;
         while (running_.load()) {
             if (copy_a_ != nullptr && copy_b_ != nullptr && copy_bytes_ > 0) {
-                cudaMemcpyAsync(copy_b_, copy_a_, copy_bytes_, cudaMemcpyDeviceToDevice, stream_);
-                cudaMemcpyAsync(copy_a_, copy_b_, copy_bytes_, cudaMemcpyDeviceToDevice, stream_);
+                (void)infinirtMemcpyAsync(copy_b_, copy_a_, copy_bytes_, INFINIRT_MEMCPY_D2D, stream_);
+                (void)infinirtMemcpyAsync(copy_a_, copy_b_, copy_bytes_, INFINIRT_MEMCPY_D2D, stream_);
             }
+#if defined(ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL)
             if (compute_ != nullptr && compute_bytes_ > 0) {
                 auto *data = static_cast<float *>(compute_);
                 size_t n = compute_bytes_ / sizeof(float);
                 analyzerLoadDemoLaunchCompute(data, n, 1024, stream_);
             }
+#endif
             if ((++iter % 4) == 0) {
-                cudaStreamSynchronize(stream_);
+                (void)infinirtStreamSynchronize(stream_);
             }
         }
-        cudaStreamSynchronize(stream_);
+        (void)infinirtStreamSynchronize(stream_);
     }
 
+    DetectedDevice device_;
     std::atomic<bool> running_{false};
     std::thread worker_;
-    cudaStream_t stream_ = nullptr;
+    infinirtStream_t stream_ = nullptr;
     void *hold_ = nullptr;
     void *copy_a_ = nullptr;
     void *copy_b_ = nullptr;
@@ -366,7 +376,7 @@ void printHeader(const DetectedDevice &dev) {
     std::printf(" Analyzer Load Demo - different GPU load x different task trace\n");
     printRule('=');
     std::printf(" Device          : %d x %s\n", dev.count, dev.name);
-    std::printf(" Resource source : infinirtGetDeviceResourceSnapshot() -> IXML/NVML-compatible fields\n");
+    std::printf(" Resource source : infinirtGetDeviceResourceSnapshot() -> backend management fields\n");
     std::printf(" Task source     : synthetic OpTrace windows for phase/goal comparison\n");
     std::printf(" Requirement     : analyze() must finish within 10 seconds\n");
     printRule('=');
@@ -416,7 +426,7 @@ void printInterpretation() {
     std::printf(" - Rows under the same GPU Load show how task semantics change phase/bottleneck/goal.\n");
     std::printf(" - Columns mem%%/gpu%%/bw%% are live resource readings from the accelerator.\n");
     std::printf(" - memory_pressure should push most tasks toward memory_bound + memory_safe.\n");
-    std::printf(" - compute/copy/mixed loads expose whether IXML reports high compute or bandwidth pressure.\n");
+    std::printf(" - compute/copy/mixed loads expose whether the backend reports high compute or bandwidth pressure.\n");
     std::printf(" - ms is end-to-end MutualAwarenessAnalyzer::analyze() latency; requirement is <= 10000 ms.\n");
     printRule('=');
 }
@@ -441,7 +451,6 @@ int main(int argc, char **argv) {
     }
 
     (void)infinirtSetDevice(dev.type, 0);
-    (void)cudaSetDevice(0);
 
     MutualAwarenessAnalyzer::instance().setEnabled(true);
     printHeader(dev);

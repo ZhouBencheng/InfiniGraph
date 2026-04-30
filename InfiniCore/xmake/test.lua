@@ -136,19 +136,26 @@ target("analyzer-demo")
     set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))
 target_end()
 
-if has_config("iluvatar-gpu") or has_config("nv-gpu") then
+if has_config("iluvatar-gpu") or has_config("nv-gpu") or has_config("metax-gpu") then
     target("analyzer-load-demo")
         set_kind("binary")
         set_default(false)
         add_deps("infinirt")
 
+        set_languages("cxx17")
         add_includedirs("include")
         add_files(os.projectdir().."/src/infinicore/device.cc")
         add_files(os.projectdir().."/src/infinicore/analyzer/*.cc")
         add_files(os.projectdir().."/src/analyzer-load-demo/main.cc")
-        add_files(os.projectdir().."/src/analyzer-load-demo/load_kernels.cu")
 
-        if has_config("iluvatar-gpu") then
+        if has_config("metax-gpu") then
+            add_defines("ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL")
+            add_files(os.projectdir().."/src/analyzer-load-demo/load_kernels.maca", {rule = "maca"})
+            add_cxflags("-fPIC")
+            add_cxxflags("-fPIC")
+        elseif has_config("iluvatar-gpu") then
+            add_defines("ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL")
+            add_files(os.projectdir().."/src/analyzer-load-demo/load_kernels.cu")
             set_toolchains("iluvatar.toolchain")
             add_rules("iluvatar.env")
             set_policy("build.cuda.devlink", false)
@@ -161,9 +168,10 @@ if has_config("iluvatar-gpu") or has_config("nv-gpu") then
             add_cxflags("-fPIC")
             add_cxxflags("-fPIC")
         else
+            add_defines("ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL")
+            add_files(os.projectdir().."/src/analyzer-load-demo/load_kernels.cu")
             set_policy("build.cuda.devlink", true)
             add_links("cudart")
-            set_languages("cxx17")
             add_cuflags("-std=c++17")
         end
 
