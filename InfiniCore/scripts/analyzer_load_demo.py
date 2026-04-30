@@ -3,7 +3,7 @@
 """
 Build and run analyzer-load-demo.
 
-The C++/CUDA demo creates real GPU pressure while the analyzer samples live
+The C++ demo creates real GPU pressure while the analyzer samples live
 runtime resources and compares different OpTrace task windows.
 """
 
@@ -18,6 +18,7 @@ from pathlib import Path
 CONFIG_PRESETS = {
     "none": [],
     "iluvatar": ["--mutual-awareness=y", "--iluvatar-gpu=y", "--ccl=y"],
+    "metax": ["--mutual-awareness=y", "--metax-gpu=y", "--ccl=y"],
     "nvidia": ["--mutual-awareness=y", "--nv-gpu=y", "--ccl=y"],
 }
 

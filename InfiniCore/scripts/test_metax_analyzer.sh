@@ -178,6 +178,11 @@ xmake build analyzer-demo
 pass "analyzer-demo 构建成功"
 
 echo ""
+echo "  构建 analyzer-load-demo ..."
+xmake build analyzer-load-demo
+pass "analyzer-load-demo 构建成功"
+
+echo ""
 echo "  构建 analyzer-test ..."
 if xmake build analyzer-test; then
     ANALYZER_TEST_BUILT=1
@@ -201,8 +206,14 @@ xmake run analyzer-demo
 pass "真实 analyzer-demo 运行通过"
 echo ""
 
-# ---- Step 5: 运行 analyzer 单元测试 ----
-echo "--- Step 5: 运行 analyzer 单元测试 ---"
+# ---- Step 5: 运行资源负载矩阵 demo ----
+echo "--- Step 5: 运行资源负载矩阵 demo ---"
+xmake run analyzer-load-demo 1200
+pass "资源负载矩阵 demo 运行通过"
+echo ""
+
+# ---- Step 6: 运行 analyzer 单元测试 ----
+echo "--- Step 6: 运行 analyzer 单元测试 ---"
 if [ "$ANALYZER_TEST_BUILT" -eq 1 ]; then
     xmake run analyzer-test
     pass "analyzer 单元测试通过"

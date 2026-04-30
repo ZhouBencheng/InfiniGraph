@@ -104,7 +104,7 @@
 | 硬件层测试 | `infinirt-test-analyzer-hw` + `scripts/test_iluvatar_analyzer.sh` | `infinirt-test-analyzer-hw` + `scripts/test_metax_analyzer.sh` |
 | OpTrace 自动埋点 | `INFINICORE_GRAPH_OP_RECORD_OR_RUN` 已在生产 op 路径记录 | 同左；已补 `AllReduce -> ALLREDUCE` 注册 |
 | `collectRuntimeResourceSnapshots()` | 枚举所有非 CPU runtime 设备并拉取快照 | 同左 |
-| 真实分析输出 demo | `src/analyzer-demo/main.cc` + `scripts/analyzer_demo.py --configure iluvatar` | `src/analyzer-demo/main.cc` + `scripts/analyzer_demo.py --configure metax` |
+| 真实分析输出 demo | `src/analyzer-demo/main.cc` + `scripts/analyzer_demo.py --configure iluvatar`；`analyzer-load-demo` 支持真实 GPU 负载矩阵 | `src/analyzer-demo/main.cc` + `scripts/analyzer_demo.py --configure metax`；`analyzer-load-demo` 支持真实 GPU 负载矩阵 |
 | InfiniLM 集成 | Analyzer C++ API 已可调用；InfiniLM 侧仍需接入调用点 | 同左 |
 
 ## 代码入口
@@ -121,8 +121,12 @@
   - 生产 OpTrace 的 class name 到 `OpType` 映射。
 - `src/analyzer-demo/main.cc`
   - 真实需求分析输出 demo。
+- `src/analyzer-load-demo/`
+  - 真实 GPU 负载与任务 trace 矩阵 demo；CUDA/CoreX 后端用 `.cu` 计算压测，MetaX 后端用 `.maca` 计算压测，其余显存和 D2D copy 负载走 `infinirt`。
 - `scripts/analyzer_demo.py`
   - 构建/运行真实 C++ demo 的薄入口，不再输出模拟数据。
+- `scripts/analyzer_load_demo.py`
+  - 构建/运行不同 GPU 负载 x 不同任务 trace 的需求分析矩阵。
 
 ## 验证命令
 
@@ -157,6 +161,7 @@ mx-smi
 find /opt/mxdriver /opt/maca /opt/mxn100 -name 'libmxsml.so*'
 bash scripts/test_metax_analyzer.sh
 python3 scripts/analyzer_demo.py --configure metax
+python3 scripts/analyzer_load_demo.py --configure metax
 ```
 
 如 MetaX 现场使用 MC 运行时：
@@ -165,6 +170,7 @@ python3 scripts/analyzer_demo.py --configure metax
 cd InfiniCore
 METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 python3 scripts/analyzer_demo.py --configure metax --extra-config --use-mc=y
+python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=y
 ```
 
 ## 降级行为
@@ -198,7 +204,8 @@ python3 scripts/analyzer_demo.py --configure metax --extra-config --use-mc=y
    - `MxSmlGetMemoryInfo`、`MxSmlGetHbmBandWidth`、`MxSmlGetDmaBandwidth`、`MxSmlGetPcieThroughput`。
    - `MxSmlGetMetaXLinkBandwidth`、`MxSmlGetMetaXLinkTrafficStat`。
    - `MxSmlGetNumberOfProcess`、`MxSmlGetProcessInfo`、`MxSmlGetDeviceTopology`。
-4. 当前实现验证仍看 extension utilization/memory、HCCL communication sampling 和 analyzer demo；base MXSML 高阶字段暂作为增强候选。
+4. 当前实现验证仍看 extension utilization/memory、HCCL communication sampling、`analyzer-demo` 与 `analyzer-load-demo`；base MXSML 高阶字段暂作为增强候选。
+5. 如需展示不同 GPU 负载下的输出差异，运行 `analyzer-load-demo`。它会依次制造 idle、memory pressure、D2D copy、compute kernel、mixed 负载，并对 Prefill、Decode、GEMM/MLP、KV Cache、AllReduce trace 输出 phase / bottleneck / goal / live resource 表格。
 
 ## 资料来源
 
