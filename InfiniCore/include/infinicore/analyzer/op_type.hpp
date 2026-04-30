@@ -189,4 +189,14 @@ inline bool isKvCacheOp(OpType type) {
     }
 }
 
+/// Check if an op type is collective communication related.
+inline bool isCommunicationOp(OpType type) {
+    switch (type) {
+    case OpType::ALLREDUCE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace infinicore::analyzer

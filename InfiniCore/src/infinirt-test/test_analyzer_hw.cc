@@ -1,8 +1,8 @@
 // ============================================================
-// Hardware-level analyzer tests for Iluvatar (and NVIDIA) backends
+// Hardware-level analyzer tests for Iluvatar, MetaX, and NVIDIA backends
 //
 // Verifies the infinirt layer: getMemInfo, getDeviceResourceSnapshot,
-// event timing, and management library (NVML/IXML) loading.
+// event timing, and management library (NVML/IXML/MXSML) loading.
 //
 // Build & run:
 //   xmake build infinirt-test-analyzer-hw
@@ -40,7 +40,7 @@ static infiniDevice_t g_device_type = INFINI_DEVICE_CPU;
 static int g_device_count = 0;
 
 static void detectDevice() {
-    infiniDevice_t try_types[] = {INFINI_DEVICE_ILUVATAR, INFINI_DEVICE_NVIDIA};
+    infiniDevice_t try_types[] = {INFINI_DEVICE_ILUVATAR, INFINI_DEVICE_METAX, INFINI_DEVICE_NVIDIA};
     for (auto dt : try_types) {
         int count = 0;
         if (infinirtGetDeviceCount(dt, &count) == INFINI_STATUS_SUCCESS && count > 0) {
@@ -55,6 +55,7 @@ static const char *deviceTypeName(infiniDevice_t dt) {
     switch (dt) {
     case INFINI_DEVICE_NVIDIA: return "NVIDIA";
     case INFINI_DEVICE_ILUVATAR: return "Iluvatar";
+    case INFINI_DEVICE_METAX: return "MetaX";
     default: return "Unknown";
     }
 }
@@ -108,7 +109,38 @@ static bool test_snapshot_memory() {
 }
 
 // ============================================================
-// Test 3: getDeviceResourceSnapshot — utilization (NVML/IXML)
+// Test 3: getDeviceResourceSnapshot — real device/product name
+// ============================================================
+
+static bool test_snapshot_device_name() {
+    if (g_device_count == 0) { printf("(skip: no GPU) "); return true; }
+
+    infinirtDeviceResourceSnapshot_t snap{};
+    auto status = infinirtGetDeviceResourceSnapshot(g_device_type, 0, &snap);
+    if (status != INFINI_STATUS_SUCCESS) {
+        printf("(snapshot returned %d) ", status);
+        return false;
+    }
+
+    if (!(snap.valid_fields & INFINIRT_RESOURCE_FIELD_DEVICE_NAME)) {
+        printf("(DEVICE_NAME flag not set) ");
+        return false;
+    }
+    if (snap.device_name[0] == '\0') {
+        printf("(device_name empty) ");
+        return false;
+    }
+    if (std::strlen(snap.device_name) >= INFINIRT_DEVICE_NAME_MAX) {
+        printf("(device_name not bounded) ");
+        return false;
+    }
+
+    printf("(name=%s) ", snap.device_name);
+    return true;
+}
+
+// ============================================================
+// Test 4: getDeviceResourceSnapshot — utilization (NVML/IXML/MXSML)
 // ============================================================
 
 static bool test_snapshot_utilization() {
@@ -121,7 +153,7 @@ static bool test_snapshot_utilization() {
     bool has_bw = (snap.valid_fields & INFINIRT_RESOURCE_FIELD_MEMORY_BANDWIDTH_UTILIZATION) != 0;
 
     if (!has_compute || !has_bw) {
-        printf("(utilization unavailable — NVML/IXML not loaded? compute=%s, bw=%s) ",
+        printf("(utilization unavailable — NVML/IXML/MXSML not loaded? compute=%s, bw=%s) ",
                has_compute ? "yes" : "no", has_bw ? "yes" : "no");
         return false;
     }
@@ -138,7 +170,7 @@ static bool test_snapshot_utilization() {
 }
 
 // ============================================================
-// Test 4: getDeviceResourceSnapshot — communication baseline
+// Test 5: getDeviceResourceSnapshot — communication baseline
 // ============================================================
 
 static bool test_snapshot_communication() {
@@ -159,7 +191,7 @@ static bool test_snapshot_communication() {
 }
 
 // ============================================================
-// Test 5: event create / record / elapsed time
+// Test 6: event create / record / elapsed time
 // ============================================================
 
 static bool test_event_timing() {
@@ -212,7 +244,7 @@ static bool test_event_timing() {
 }
 
 // ============================================================
-// Test 6: malloc / memcpy round-trip
+// Test 7: malloc / memcpy round-trip
 // ============================================================
 
 static bool test_malloc_memcpy() {
@@ -255,7 +287,7 @@ static bool test_malloc_memcpy() {
 }
 
 // ============================================================
-// Test 7: multi-device snapshot
+// Test 8: multi-device snapshot
 // ============================================================
 
 static bool test_multi_device_snapshot() {
@@ -299,6 +331,7 @@ int main() {
 
     RUN(getMemInfo);
     RUN(snapshot_memory);
+    RUN(snapshot_device_name);
     RUN(snapshot_utilization);
     RUN(snapshot_communication);
     RUN(event_timing);

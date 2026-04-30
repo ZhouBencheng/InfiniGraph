@@ -1,5 +1,9 @@
 # Iluvatar Analyzer Support — PR 说明与测试指南
 
+> Historical note: this document is an older PR/debug guide for the initial Iluvatar enablement work.
+> It records issues that existed before the current BI-V150 acceptance path. For current status,
+> use `docs/resource-load-awareness-implementation.md` and `docs/iluvatar-10s-acceptance-status.md`.
+
 ## 1. 背景：为什么要改
 
 Mutual Awareness Analyzer 模块在 NVIDIA GPU 上已完整实现并通过测试，但在天数智芯（Iluvatar）BI-V150 上存在两个阻塞性问题：
@@ -110,6 +114,7 @@ xmake run infinirt-test-analyzer-hw
 
 [TEST] getMemInfo                                    (free=31.9 GiB, total=32.0 GiB) PASSED
 [TEST] snapshot_memory                               (used=64.0 MiB, free=31936.0 MiB, total=32768.0 MiB) PASSED
+[TEST] snapshot_device_name                          (name=Iluvatar BI-V150) PASSED
 [TEST] snapshot_utilization                          (compute=0.0%, mem_bw=0.0%) PASSED
 [TEST] snapshot_communication                        (comm_ratio=0.000, comm_bytes=0) PASSED
 [TEST] event_timing                                  (elapsed=0.012 ms, status=0) PASSED
@@ -117,7 +122,7 @@ xmake run infinirt-test-analyzer-hw
 [TEST] multi_device_snapshot                         [dev0: 32.0GiB] [dev1: 32.0GiB] PASSED
 
 ========================================
- Results: 7 passed, 0 failed
+ Results: 8 passed, 0 failed
 ========================================
 ```
 

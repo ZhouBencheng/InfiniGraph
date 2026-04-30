@@ -72,8 +72,8 @@ public:
     /// Enable / disable the analyzer.
     /// When disabled, analyze() returns a default intent and
     /// op trace recording is skipped.
-    void setEnabled(bool enabled) { enabled_ = enabled; }
-    bool isEnabled() const { return enabled_; }
+    void setEnabled(bool enabled);
+    bool isEnabled() const;
 
     /// Graph recording support: when graph recording stops,
     /// analyze the recorded op sequence once and cache the result.
@@ -90,8 +90,6 @@ private:
 
     OptimizationIntent last_intent_;
     mutable std::mutex mutex_;
-
-    bool enabled_ = true;
 
     // Graph recording cache
     bool graph_intent_cached_ = false;
@@ -114,5 +112,8 @@ OptimizationGoal getCurrentOptimizationGoal();
 
 /// Enable / disable the mutual awareness analyzer.
 void setAnalyzerEnabled(bool enabled);
+
+/// Query whether the mutual awareness analyzer is enabled.
+bool isAnalyzerEnabled();
 
 } // namespace infinicore::analyzer

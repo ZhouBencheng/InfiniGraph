@@ -7,6 +7,7 @@
 // ============================================================
 
 #include "infinicore/analyzer/op_trace.hpp"
+#include "infinicore/analyzer/op_type_registry.hpp"
 #include "infinicore/analyzer/phase_detector.hpp"
 #include "infinicore/analyzer/resource_sensor.hpp"
 #include "infinicore/analyzer/intent_generator.hpp"
@@ -17,6 +18,7 @@
 #include "infinicore/ops/distributed/allreduce.hpp"
 #include "infinicore/ops/flash_attention.hpp"
 #include "infinicore/ops/per_tensor_quant_i8.hpp"
+#include "infinirt.h"
 
 #include <cassert>
 #include <chrono>
@@ -278,6 +280,39 @@ void test_op_trace_records_metadata() {
     trace.clear();
 }
 
+void test_op_trace_runtime_switch() {
+    auto &trace = getGlobalOpTrace();
+    auto &analyzer = MutualAwarenessAnalyzer::instance();
+    trace.clear();
+    analyzer.clearGraphCache();
+
+    analyzer.setEnabled(false);
+    ASSERT_TRUE(!analyzer.isEnabled());
+    ASSERT_TRUE(!isAnalyzerEnabled());
+    traceOp(OpType::GEMM,
+            nullptr,
+            0,
+            static_cast<uint8_t>(infinicore::DataType::F16),
+            static_cast<uint8_t>(infinicore::Device::Type::NVIDIA),
+            0);
+    ASSERT_EQ(trace.size(), 0u);
+    ASSERT_EQ(static_cast<int>(analyzer.analyze().global.current_phase),
+              static_cast<int>(PhaseType::UNKNOWN));
+
+    analyzer.setEnabled(true);
+    ASSERT_TRUE(analyzer.isEnabled());
+    ASSERT_TRUE(isAnalyzerEnabled());
+    traceOp(OpType::GEMM,
+            nullptr,
+            0,
+            static_cast<uint8_t>(infinicore::DataType::F16),
+            static_cast<uint8_t>(infinicore::Device::Type::NVIDIA),
+            0);
+    ASSERT_EQ(trace.size(), 1u);
+
+    trace.clear();
+}
+
 // ============================================================
 // OpType Tests
 // ============================================================
@@ -310,12 +345,12 @@ void test_op_type_to_string() {
 }
 
 void test_graph_op_type_mapping() {
-    ASSERT_EQ(static_cast<int>(infinicore::op::Add::op_type_id), static_cast<int>(OpType::ADD));
-    ASSERT_EQ(static_cast<int>(infinicore::op::FlashAttention::op_type_id),
+    ASSERT_EQ(static_cast<int>(opTypeFromName("Add")), static_cast<int>(OpType::ADD));
+    ASSERT_EQ(static_cast<int>(opTypeFromName("FlashAttention")),
               static_cast<int>(OpType::FLASH_ATTENTION));
-    ASSERT_EQ(static_cast<int>(infinicore::op::PerTensorQuantI8::op_type_id),
+    ASSERT_EQ(static_cast<int>(opTypeFromName("PerTensorQuantI8")),
               static_cast<int>(OpType::PER_TENSOR_QUANT_I8));
-    ASSERT_EQ(static_cast<int>(infinicore::op::distributed::AllReduce::op_type_id),
+    ASSERT_EQ(static_cast<int>(opTypeFromName("AllReduce")),
               static_cast<int>(OpType::ALLREDUCE));
 }
 
@@ -428,6 +463,17 @@ void test_phase_detector_kv_cache() {
 
     auto phase = detector.detect(window);
     ASSERT_EQ(static_cast<int>(phase), static_cast<int>(PhaseType::KV_CACHE));
+}
+
+void test_phase_detector_communication() {
+    PhaseDetector detector;
+    auto window = makeWindow({
+        OpType::ALLREDUCE, OpType::ALLREDUCE, OpType::ALLREDUCE,
+        OpType::GEMM, OpType::ADD
+    });
+
+    auto phase = detector.detect(window);
+    ASSERT_EQ(static_cast<int>(phase), static_cast<int>(PhaseType::COMMUNICATION));
 }
 
 void test_phase_detector_decode() {
@@ -651,8 +697,20 @@ void test_intent_generator_communication_phase() {
 
 void test_optimization_intent_device_lookup() {
     OptimizationIntent intent;
-    intent.per_device.push_back({0, 0.3f, 700, BottleneckType::COMPUTE_BOUND});
-    intent.per_device.push_back({1, 0.8f, 200, BottleneckType::MEMORY_BOUND});
+    DeviceLocalIntent device0;
+    device0.device_id = 0;
+    device0.memory_usage_ratio = 0.3f;
+    device0.memory_available_bytes = 700;
+    device0.local_bottleneck = BottleneckType::COMPUTE_BOUND;
+
+    DeviceLocalIntent device1;
+    device1.device_id = 1;
+    device1.memory_usage_ratio = 0.8f;
+    device1.memory_available_bytes = 200;
+    device1.local_bottleneck = BottleneckType::MEMORY_BOUND;
+
+    intent.per_device.push_back(device0);
+    intent.per_device.push_back(device1);
 
     ASSERT_TRUE(intent.getDeviceIntent(0) != nullptr);
     ASSERT_TRUE(intent.getDeviceIntent(1) != nullptr);
@@ -819,7 +877,7 @@ void test_mutual_awareness_analyzer_with_resource_snapshot() {
     analyzer.clearGraphCache();
 }
 
-void test_mutual_awareness_analyzer_auto_collect_memory_stats() {
+void test_mutual_awareness_analyzer_auto_collect_runtime_snapshots() {
     auto &analyzer = MutualAwarenessAnalyzer::instance();
     auto &trace = getGlobalOpTrace();
     trace.clear();
@@ -840,24 +898,43 @@ void test_mutual_awareness_analyzer_auto_collect_memory_stats() {
             static_cast<uint8_t>(infinicore::Device::Type::CPU),
             0);
 
-    infinicore::context::setDevice(infinicore::Device::cpu());
-    auto workspace = infinicore::context::allocateMemory(8 * 1024 * 1024);
-    (void)workspace;
-
     auto intent = analyzer.analyze();
 
-    ASSERT_TRUE(!intent.per_device.empty());
-    ASSERT_EQ(static_cast<int>(intent.global.goal),
-              static_cast<int>(OptimizationGoal::MEMORY_SAFE));
+    int counts[INFINI_DEVICE_TYPE_COUNT] = {0};
+    bool have_accelerator = false;
+    if (infinirtGetAllDeviceCount(counts) == INFINI_STATUS_SUCCESS) {
+        for (int dt = 0; dt < INFINI_DEVICE_TYPE_COUNT; ++dt) {
+            if (dt != INFINI_DEVICE_CPU && counts[dt] > 0) {
+                have_accelerator = true;
+                break;
+            }
+        }
+    }
 
-    bool saw_memory_pressure = false;
+    if (have_accelerator) {
+        ASSERT_TRUE(!intent.per_device.empty());
+        bool saw_resource_signal = false;
+        for (auto const &dev : intent.per_device) {
+            if (dev.resource_confidence > 0.0f) {
+                saw_resource_signal = true;
+                break;
+            }
+        }
+        ASSERT_TRUE(saw_resource_signal);
+    } else {
+        ASSERT_TRUE(intent.per_device.empty());
+        ASSERT_EQ(static_cast<int>(intent.global.goal),
+                  static_cast<int>(OptimizationGoal::THROUGHPUT_FIRST));
+    }
+
+    bool valid_memory_ratios = true;
     for (auto const &dev : intent.per_device) {
-        if (dev.memory_usage_ratio > 0.85f) {
-            saw_memory_pressure = true;
+        if (dev.memory_usage_ratio < 0.0f || dev.memory_usage_ratio > 1.0f) {
+            valid_memory_ratios = false;
             break;
         }
     }
-    ASSERT_TRUE(saw_memory_pressure);
+    ASSERT_TRUE(valid_memory_ratios);
 
     trace.clear();
     analyzer.clearGraphCache();
@@ -1067,6 +1144,7 @@ int main() {
     RUN_TEST(op_trace_entry_shape);
     RUN_TEST(op_trace_global_singleton);
     RUN_TEST(op_trace_records_metadata);
+    RUN_TEST(op_trace_runtime_switch);
 
     // OpType tests
     RUN_TEST(op_type_classification);
@@ -1083,6 +1161,7 @@ int main() {
     RUN_TEST(phase_detector_attention);
     RUN_TEST(phase_detector_gemm_mlp);
     RUN_TEST(phase_detector_kv_cache);
+    RUN_TEST(phase_detector_communication);
     RUN_TEST(phase_detector_decode);
     RUN_TEST(phase_detector_prefill);
     RUN_TEST(phase_detector_empty);
@@ -1108,7 +1187,7 @@ int main() {
     RUN_TEST(mutual_awareness_analyzer_goal_prefill);
     RUN_TEST(mutual_awareness_analyzer_goal_memory_safe_with_stats);
     RUN_TEST(mutual_awareness_analyzer_with_resource_snapshot);
-    RUN_TEST(mutual_awareness_analyzer_auto_collect_memory_stats);
+    RUN_TEST(mutual_awareness_analyzer_auto_collect_runtime_snapshots);
     RUN_TEST(attention_execute_consumes_goal_dispatch);
 
     // End-to-end tests

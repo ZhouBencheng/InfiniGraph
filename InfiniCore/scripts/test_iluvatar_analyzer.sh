@@ -16,6 +16,13 @@ NC='\033[0m'
 pass() { echo -e "  ${GREEN}OK${NC}: $1"; }
 fail() { echo -e "  ${RED}FAIL${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
+symbol_count() {
+    local lib="$1"
+    local symbol="$2"
+    local symbols
+    symbols=$(nm -D "$lib" 2>/dev/null || true)
+    printf '%s\n' "$symbols" | awk -v sym="$symbol" 'index($0, sym) > 0 { count++ } END { print count + 0 }'
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -54,21 +61,39 @@ IXML_PATH=$(find /usr/local/corex* -name "libixml.so" 2>/dev/null | head -1)
 if [ -n "$IXML_PATH" ]; then
     pass "libixml.so: $IXML_PATH"
     # 检查关键符号
-    NVML_INIT=$(nm -D "$IXML_PATH" 2>/dev/null | grep -c "nvmlInit_v2" || echo 0)
-    NVML_UTIL=$(nm -D "$IXML_PATH" 2>/dev/null | grep -c "nvmlDeviceGetUtilizationRates" || echo 0)
-    NVML_HANDLE=$(nm -D "$IXML_PATH" 2>/dev/null | grep -c "nvmlDeviceGetHandleByIndex_v2" || echo 0)
-    NVML_SHUTDOWN=$(nm -D "$IXML_PATH" 2>/dev/null | grep -c "nvmlShutdown" || echo 0)
+    NVML_INIT=$(symbol_count "$IXML_PATH" "nvmlInit_v2")
+    NVML_UTIL=$(symbol_count "$IXML_PATH" "nvmlDeviceGetUtilizationRates")
+    NVML_HANDLE=$(symbol_count "$IXML_PATH" "nvmlDeviceGetHandleByIndex_v2")
+    NVML_NAME=$(symbol_count "$IXML_PATH" "nvmlDeviceGetName")
+    NVML_MEM=$(symbol_count "$IXML_PATH" "nvmlDeviceGetMemoryInfo")
+    NVML_PCIE=$(symbol_count "$IXML_PATH" "nvmlDeviceGetPcieThroughput")
+    NVML_POWER=$(symbol_count "$IXML_PATH" "nvmlDeviceGetPowerUsage")
+    NVML_TEMP=$(symbol_count "$IXML_PATH" "nvmlDeviceGetTemperature")
+    NVML_SHUTDOWN=$(symbol_count "$IXML_PATH" "nvmlShutdown")
 
-    echo "  符号检查:"
+    echo "  IXML / NVML-compatible 符号检查:"
     echo "    nvmlInit_v2:                   $NVML_INIT"
-    echo "    nvmlDeviceGetUtilizationRates: $NVML_UTIL"
     echo "    nvmlDeviceGetHandleByIndex_v2: $NVML_HANDLE"
+    echo "    nvmlDeviceGetName:             $NVML_NAME"
+    echo "    nvmlDeviceGetUtilizationRates: $NVML_UTIL"
+    echo "    nvmlDeviceGetMemoryInfo:       $NVML_MEM"
+    echo "    nvmlDeviceGetPcieThroughput:   $NVML_PCIE"
+    echo "    nvmlDeviceGetPowerUsage:       $NVML_POWER"
+    echo "    nvmlDeviceGetTemperature:      $NVML_TEMP"
     echo "    nvmlShutdown:                  $NVML_SHUTDOWN"
 
-    if [ "$NVML_INIT" -gt 0 ] && [ "$NVML_UTIL" -gt 0 ] && [ "$NVML_HANDLE" -gt 0 ] && [ "$NVML_SHUTDOWN" -gt 0 ]; then
-        pass "所有 NVML 兼容符号存在"
+    if [ "$NVML_INIT" -gt 0 ] && [ "$NVML_HANDLE" -gt 0 ] && \
+       [ "$NVML_NAME" -gt 0 ] && [ "$NVML_UTIL" -gt 0 ] && \
+       [ "$NVML_MEM" -gt 0 ] && [ "$NVML_SHUTDOWN" -gt 0 ]; then
+        pass "IXML 核心资源符号完整"
     else
-        warn "部分符号缺失 — utilization 查询可能不可用"
+        warn "IXML 核心符号缺失 — device name / memory / utilization 查询可能降级"
+    fi
+
+    if [ "$NVML_PCIE" -gt 0 ] && [ "$NVML_POWER" -gt 0 ] && [ "$NVML_TEMP" -gt 0 ]; then
+        pass "IXML 增强监控符号完整"
+    else
+        warn "IXML 增强监控符号不完整 — PCIe / power / temperature 仅作为可选增强"
     fi
 
     # 确保运行时能找到
@@ -77,13 +102,47 @@ else
     warn "libixml.so 未找到 — GPU utilization 测试预期失败（不影响其他功能）"
 fi
 
+# libixdcgm.so 是天数 CoreX 的可选增强管理栈，用于 SM/Dram active、进程和诊断类指标。
+IXDCGM_PATH=$(find /usr/local/corex* /usr/lib /usr/lib64 /opt -name "libixdcgm.so*" 2>/dev/null | head -1 || true)
+if [ -n "$IXDCGM_PATH" ]; then
+    pass "libixdcgm.so: $IXDCGM_PATH"
+    export LD_LIBRARY_PATH="$(dirname "$IXDCGM_PATH"):${LD_LIBRARY_PATH:-}"
+
+    IXDCGM_INIT=$(symbol_count "$IXDCGM_PATH" "dcgmInit")
+    IXDCGM_SHUTDOWN=$(symbol_count "$IXDCGM_PATH" "dcgmShutdown")
+    IXDCGM_EMBEDDED=$(symbol_count "$IXDCGM_PATH" "dcgmStartEmbedded")
+    IXDCGM_CONNECT=$(symbol_count "$IXDCGM_PATH" "dcgmConnect")
+    IXDCGM_VALUES=$(symbol_count "$IXDCGM_PATH" "dcgmGetLatestValuesForFields")
+    IXDCGM_WATCH=$(symbol_count "$IXDCGM_PATH" "dcgmWatchFields")
+    IXDCGM_ATTR=$(symbol_count "$IXDCGM_PATH" "dcgmGetDeviceAttributes")
+
+    echo "  IXDCGM / DCGM-like 可选符号检查:"
+    echo "    dcgmInit:                     $IXDCGM_INIT"
+    echo "    dcgmShutdown:                 $IXDCGM_SHUTDOWN"
+    echo "    dcgmStartEmbedded*:           $IXDCGM_EMBEDDED"
+    echo "    dcgmConnect:                  $IXDCGM_CONNECT"
+    echo "    dcgmGetLatestValuesForFields: $IXDCGM_VALUES"
+    echo "    dcgmWatchFields:              $IXDCGM_WATCH"
+    echo "    dcgmGetDeviceAttributes:      $IXDCGM_ATTR"
+
+    if [ "$IXDCGM_INIT" -gt 0 ] && [ "$IXDCGM_SHUTDOWN" -gt 0 ] && \
+       { [ "$IXDCGM_EMBEDDED" -gt 0 ] || [ "$IXDCGM_CONNECT" -gt 0 ]; } && \
+       [ "$IXDCGM_VALUES" -gt 0 ] && [ "$IXDCGM_WATCH" -gt 0 ]; then
+        pass "IXDCGM 可用于后续增强资源采样"
+    else
+        warn "IXDCGM 符号不完整；当前主线仍使用 IXML"
+    fi
+else
+    warn "libixdcgm.so 未找到；跳过 IXDCGM 增强符号检查"
+fi
+
 echo ""
 
 # ---- Step 2: 构建 ----
 echo "--- Step 2: 构建 ---"
 
 echo "  配置 xmake ..."
-xmake f --iluvatar-gpu=y --mutual-awareness=y -c 2>&1 | tail -3
+xmake f --iluvatar-gpu=y --mutual-awareness=y --ccl=y -c -y
 echo ""
 
 echo "  构建 infinirt-test-analyzer-hw ..."
@@ -105,6 +164,16 @@ fi
 
 echo ""
 
+echo "  构建 analyzer-demo ..."
+if xmake build analyzer-demo 2>&1; then
+    pass "analyzer-demo 构建成功"
+else
+    fail "analyzer-demo 构建失败"
+    exit 1
+fi
+
+echo ""
+
 # ---- Step 3: 运行硬件层测试 ----
 echo "--- Step 3: 运行硬件层测试 ---"
 echo ""
@@ -119,8 +188,23 @@ fi
 
 echo ""
 
-# ---- Step 4: 运行 analyzer 单元测试 ----
-echo "--- Step 4: 运行 analyzer 单元测试 ---"
+# ---- Step 4: 运行真实输出 demo ----
+echo "--- Step 4: 运行真实输出 demo ---"
+echo ""
+xmake run analyzer-demo
+DEMO_EXIT=$?
+echo ""
+if [ $DEMO_EXIT -eq 0 ]; then
+    pass "真实 analyzer-demo 运行通过"
+else
+    fail "真实 analyzer-demo 运行失败 (exit code: $DEMO_EXIT)"
+    exit $DEMO_EXIT
+fi
+
+echo ""
+
+# ---- Step 5: 运行 analyzer 单元测试 ----
+echo "--- Step 5: 运行 analyzer 单元测试 ---"
 echo ""
 if xmake run analyzer-test 2>&1; then
     ANALYZER_EXIT=$?

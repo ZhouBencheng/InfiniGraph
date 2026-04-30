@@ -43,6 +43,10 @@ DeviceResourceSnapshot buildSnapshotFromInfinirt(
         snapshot.has_kernel_time_ratio = (rt_snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO) != 0;
         snapshot.has_communication = (rt_snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_COMMUNICATION) != 0;
         snapshot.kernel_time_estimated = (rt_snapshot.estimated_fields & INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO) != 0;
+        if ((rt_snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_DEVICE_NAME) != 0
+            && rt_snapshot.device_name[0] != '\0') {
+            snapshot.device_name = rt_snapshot.device_name;
+        }
 
         snapshot.free_bytes = rt_snapshot.free_bytes;
         snapshot.total_bytes = rt_snapshot.total_bytes;
@@ -77,9 +81,29 @@ DeviceResourceSnapshot buildSnapshotFromInfinirt(
 
 std::vector<DeviceResourceSnapshot> collectRuntimeResourceSnapshots() {
     std::vector<DeviceResourceSnapshot> device_snapshots;
-    // TODO: integrate with ContextImpl allocator stats when available.
-    // For now, return an empty snapshot list; the analyzer will use
-    // the fallback path that queries infinirt directly.
+
+    // Enumerate every accelerator type known to infinirt and build a
+    // snapshot per (device_type, device_id). CPU is intentionally skipped
+    // because the analyzer focuses on accelerator resource awareness.
+    int counts[INFINI_DEVICE_TYPE_COUNT] = {0};
+    if (infinirtGetAllDeviceCount(counts) != INFINI_STATUS_SUCCESS) {
+        return device_snapshots;
+    }
+
+    MemoryStats empty_allocator_stats{};
+    for (int dt = 0; dt < INFINI_DEVICE_TYPE_COUNT; ++dt) {
+        if (dt == INFINI_DEVICE_CPU) {
+            continue;
+        }
+        for (int dev_id = 0; dev_id < counts[dt]; ++dev_id) {
+            infinicore::Device device(
+                static_cast<infinicore::Device::Type>(dt),
+                static_cast<infinicore::Device::Index>(dev_id));
+            device_snapshots.push_back(
+                buildSnapshotFromInfinirt(device, empty_allocator_stats));
+        }
+    }
+
     return device_snapshots;
 }
 
@@ -98,7 +122,6 @@ MutualAwarenessAnalyzer::MutualAwarenessAnalyzer()
     : phase_detector_(),
       resource_sensor_(),
       intent_generator_(),
-      enabled_(true),
       graph_intent_cached_(false) {
 }
 
@@ -107,7 +130,7 @@ MutualAwarenessAnalyzer::MutualAwarenessAnalyzer()
 // ============================================================
 
 OptimizationIntent MutualAwarenessAnalyzer::analyze() {
-    if (!enabled_) {
+    if (!isEnabled()) {
         return OptimizationIntent{};
     }
 
@@ -145,7 +168,7 @@ OptimizationIntent MutualAwarenessAnalyzer::analyze() {
 OptimizationIntent MutualAwarenessAnalyzer::analyze(
     const std::vector<std::pair<int, MemoryStats>> &device_stats) {
 
-    if (!enabled_) {
+    if (!isEnabled()) {
         return OptimizationIntent{};
     }
 
@@ -183,7 +206,7 @@ OptimizationIntent MutualAwarenessAnalyzer::analyze(
 OptimizationIntent MutualAwarenessAnalyzer::analyze(
     const std::vector<DeviceResourceSnapshot> &device_snapshots) {
 
-    if (!enabled_) {
+    if (!isEnabled()) {
         return OptimizationIntent{};
     }
 
@@ -213,7 +236,7 @@ OptimizationIntent MutualAwarenessAnalyzer::analyze(
 }
 
 PhaseType MutualAwarenessAnalyzer::getCurrentPhase() const {
-    if (!enabled_) {
+    if (!isEnabled()) {
         return PhaseType::UNKNOWN;
     }
 
@@ -233,7 +256,7 @@ const OptimizationIntent &MutualAwarenessAnalyzer::lastIntent() const {
 // ============================================================
 
 void MutualAwarenessAnalyzer::onGraphRecordingStop() {
-    if (!enabled_) return;
+    if (!isEnabled()) return;
 
     // Analyze the op sequence recorded during graph capture
     // and cache the result. Graph ops are static, so we only
@@ -245,6 +268,17 @@ void MutualAwarenessAnalyzer::onGraphRecordingStop() {
 void MutualAwarenessAnalyzer::clearGraphCache() {
     graph_intent_cached_ = false;
     graph_cached_intent_ = OptimizationIntent{};
+}
+
+void MutualAwarenessAnalyzer::setEnabled(bool enabled) {
+    setOpTraceEnabled(enabled);
+    if (!enabled) {
+        clearGraphCache();
+    }
+}
+
+bool MutualAwarenessAnalyzer::isEnabled() const {
+    return isOpTraceEnabled();
 }
 
 // ============================================================
@@ -265,6 +299,10 @@ OptimizationGoal getCurrentOptimizationGoal() {
 
 void setAnalyzerEnabled(bool enabled) {
     MutualAwarenessAnalyzer::instance().setEnabled(enabled);
+}
+
+bool isAnalyzerEnabled() {
+    return MutualAwarenessAnalyzer::instance().isEnabled();
 }
 
 } // namespace infinicore::analyzer
