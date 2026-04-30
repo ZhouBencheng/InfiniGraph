@@ -152,6 +152,7 @@ if has_config("iluvatar-gpu") or has_config("nv-gpu") then
             set_toolchains("iluvatar.toolchain")
             add_rules("iluvatar.env")
             set_policy("build.cuda.devlink", false)
+            set_values("cuda.build.devlink", false)
             set_values("cuda.rdc", false)
             add_links("cudart")
             add_cuflags("-fPIC", "-x", "ivcore", "-std=c++17", {force = true})
