@@ -126,6 +126,7 @@
   - 真实需求分析输出 demo。
 - `src/analyzer-load-demo/`
   - 真实 GPU 负载与任务 trace 矩阵 demo；CUDA/CoreX 后端用 `.cu` 计算压测，MetaX 后端用 `.maca` 计算压测，其余显存和 D2D copy 负载走 `infinirt`。
+  - 同时包含 `Resource Replay` 段，通过显式 `DeviceResourceSnapshot` 覆盖 high-memory / high-compute / high-bandwidth / high-communication 场景，用于验证需求分析规则会随资源条件切换；该段不声称是真实 GPU 负载。
 - `scripts/analyzer_demo.py`
   - 构建/运行真实 C++ demo 的薄入口，不再输出模拟数据。
 - `scripts/analyzer_load_demo.py`
@@ -197,6 +198,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
    - 指标：`dcgmGetLatestValuesForFields`、`dcgmWatchFields`、`dcgmGetDeviceAttributes`。
 4. 当前实现验证看 `infinirt-test-analyzer-hw` 与 `analyzer-demo` 输出；IXDCGM 字段暂作为增强候选，不影响主线通过/失败。
 5. 如需展示不同 GPU 负载下的输出差异，运行 `analyzer-load-demo`。它会依次制造 idle、memory pressure、D2D copy、compute kernel、mixed 负载，并对 Prefill、Decode、GEMM/MLP、KV Cache、AllReduce trace 输出 phase / bottleneck / goal / live resource 表格。
+6. 如果现场 runtime 对单进程显存分配有限制，`memory_pressure` 会输出实际持有显存，不伪造高水位；后续 `Resource Replay` 会用显式资源快照验证高显存/高带宽/高通信下的决策切换。
 
 ### 沐曦 MetaX
 
@@ -210,6 +212,40 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
    - `MxSmlGetNumberOfProcess`、`MxSmlGetProcessInfo`、`MxSmlGetDeviceTopology`。
 4. 当前实现验证仍看 extension utilization/memory、HCCL communication sampling、`analyzer-demo` 与 `analyzer-load-demo`；base MXSML 高阶字段暂作为增强候选。
 5. 如需展示不同 GPU 负载下的输出差异，运行 `analyzer-load-demo`。它会依次制造 idle、memory pressure、D2D copy、compute kernel、mixed 负载，并对 Prefill、Decode、GEMM/MLP、KV Cache、AllReduce trace 输出 phase / bottleneck / goal / live resource 表格。
+
+## MetaX C500 实测结果（2026-04-30）
+
+测试命令：
+
+```bash
+cd /data/InfiniGraph/InfiniCore
+METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
+```
+
+结论：
+
+- 环境：`mx-smi 2.2.9`，MetaX C500 x1，MACA `3.2.1.10`，Kernel Mode Driver `3.0.11`。
+- MXSML extension 与 base 高阶符号均可见，`mxSmlExDeviceGetUtilization` / `mxSmlExDeviceGetMemoryInfo` 可用于当前资源快照。
+- `infinirt-test-analyzer-hw`：7 passed, 0 failed。
+- `analyzer-demo`：6/6 phase 正确，资源模块成功采集 1 个 MetaX 加速器，P99 `19.81 ms`，小于 10s。
+- `analyzer-load-demo`：真实负载 + replay 共 50/50 phase 正确，最坏单次分析 `41.87 ms`，小于 10s。
+- `analyzer-test`：42 passed, 0 failed。
+
+`analyzer-load-demo` 的真实负载段显示 MetaX 管理库读数会随负载变化：
+
+| 场景 | 实测资源变化 | 说明 |
+| --- | --- | --- |
+| idle | mem `1.3%`, gpu `0.0%`, bw `1.0%` | 空闲基线 |
+| memory_pressure | held `13.23 GiB`, mem `21.9%`, bw `21.0%` | 当前 MACA runtime 对单进程可分配显存存在上限，demo 记录真实可达压力 |
+| bandwidth_copy | mem `2.8%`, gpu `41.0%`, bw `2.0%` | D2D copy 在该驱动上主要反映到 GPU utilization |
+| compute_kernel | mem `1.5%`, gpu `98.0%`, bw `1.0%` | MetaX `.maca` 计算压测能打满 compute utilization |
+| mixed | held `9.73 GiB`, mem `18.2%`, gpu `91.0%`, bw `18.0%` | 显存持有 + copy + compute 的组合压力 |
+
+`Resource Replay` 段不声称是真实 GPU 负载，但验证了需求分析规则在显式资源快照下会切换：
+
+- high-memory snapshot：所有任务切到 `memory_bound + memory_safe`，本地瓶颈为 `memory_bound`。
+- high-bandwidth snapshot：Prefill / Decode / GEMM / KV 等任务切到 `bandwidth_bound` 或相应 latency/throughput 目标，本地瓶颈为 `bandwidth_bound`。
+- high-communication snapshot：所有任务切到 `communication_bound + stability_first`，本地瓶颈为 `communication_bound`。
 
 ## 资料来源
 
