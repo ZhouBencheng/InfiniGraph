@@ -20,7 +20,7 @@
    - 输出缓冲（减少 print flush 次数）
    - 跳过预热阶段的统计收集
    - 策略缓存（避免重复调用 scheduler）
-   
+
    这些都是 Python-side 的微小优化，GPU 推理内核（prefill + decode）的执行时间不会因此改变。对于 A100 上的 7B 模型推理，GPU kernel 占总时间 >95%，Python 开销 <5%。即使完全消除 Python 开销，理论上限也仅约 5% 提升。
 
 2. **测试方法学缺陷**：
