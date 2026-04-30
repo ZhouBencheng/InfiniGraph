@@ -228,7 +228,7 @@ METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 - MXSML extension 与 base 高阶符号均可见，`mxSmlExDeviceGetUtilization` / `mxSmlExDeviceGetMemoryInfo` 可用于当前资源快照。
 - `infinirt-test-analyzer-hw`：7 passed, 0 failed。
 - `analyzer-demo`：6/6 phase 正确，资源模块成功采集 1 个 MetaX 加速器，P99 `19.81 ms`，小于 10s。
-- `analyzer-load-demo`：真实负载 + replay 共 50/50 phase 正确，最坏单次分析 `41.87 ms`，小于 10s。
+- `analyzer-load-demo`：真实负载 live 段 25/25 phase 正确，`Resource Replay` 段 25/25 phase 正确；整体最坏单次分析 `41.87 ms`，小于 10s。
 - `analyzer-test`：42 passed, 0 failed。
 
 `analyzer-load-demo` 的真实负载段显示 MetaX 管理库读数会随负载变化：
@@ -246,6 +246,12 @@ METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 - high-memory snapshot：所有任务切到 `memory_bound + memory_safe`，本地瓶颈为 `memory_bound`。
 - high-bandwidth snapshot：Prefill / Decode / GEMM / KV 等任务切到 `bandwidth_bound` 或相应 latency/throughput 目标，本地瓶颈为 `bandwidth_bound`。
 - high-communication snapshot：所有任务切到 `communication_bound + stability_first`，本地瓶颈为 `communication_bound`。
+
+仍需注意的资源语义边界：
+
+- `kernel_time_ratio` 当前由 compute utilization 估计，不是独立 profiler 采样。
+- 单卡环境下 `ALLREDUCE` 任务 trace 只验证任务侧 communication phase；真实通信字节/占比需要多卡 HCCL/IXCCL 事件采样。
+- `Resource Replay` 用于规则覆盖和验收展示，不应写成真实 GPU 负载。
 
 ## 资料来源
 

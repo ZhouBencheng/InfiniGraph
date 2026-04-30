@@ -255,8 +255,8 @@ static double percentile(std::vector<double> sorted, double p) {
     return sorted[idx];
 }
 
-static void runPerformanceBench(const DetectedDevice &dev,
-                                std::vector<double> case_latencies_ms) {
+static double runPerformanceBench(const DetectedDevice &dev,
+                                  std::vector<double> case_latencies_ms) {
     constexpr int N = 100;
     auto &analyzer = MutualAwarenessAnalyzer::instance();
     auto &trace = getGlobalOpTrace();
@@ -308,6 +308,8 @@ static void runPerformanceBench(const DetectedDevice &dev,
     std::printf("  裕量倍率              :    x%.0f\n", REQUIREMENT_MS / std::max(p99, 1e-3));
     std::printf("  验收结论              : PASSED\n");
     std::putchar('\n');
+
+    return p99;
 }
 
 static void printSummary(int passed, int total, size_t device_count, double p99_ms) {
@@ -384,12 +386,7 @@ int main() {
         printOptIntent(cases[i], intents[i]);
     }
 
-    runPerformanceBench(dev, latencies_ms);
-
-    // Recompute P99 across the recorded case latencies for the summary line.
-    auto sorted_latencies = latencies_ms;
-    std::sort(sorted_latencies.begin(), sorted_latencies.end());
-    double p99 = percentile(sorted_latencies, 0.99);
+    double p99 = runPerformanceBench(dev, latencies_ms);
     size_t device_count = intents.empty() ? 0 : intents.front().per_device.size();
 
     printSummary(passed, (int)cases.size(), device_count, p99);

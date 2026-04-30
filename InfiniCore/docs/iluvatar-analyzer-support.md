@@ -1,5 +1,9 @@
 # Iluvatar Analyzer Support — PR 说明与测试指南
 
+> Historical note: this document is an older PR/debug guide for the initial Iluvatar enablement work.
+> It records issues that existed before the current BI-V150 acceptance path. For current status,
+> use `docs/resource-load-awareness-implementation.md` and `docs/iluvatar-10s-acceptance-status.md`.
+
 ## 1. 背景：为什么要改
 
 Mutual Awareness Analyzer 模块在 NVIDIA GPU 上已完整实现并通过测试，但在天数智芯（Iluvatar）BI-V150 上存在两个阻塞性问题：

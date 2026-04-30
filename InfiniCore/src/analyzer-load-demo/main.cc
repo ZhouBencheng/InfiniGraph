@@ -230,6 +230,20 @@ std::vector<ResourcePreset> buildResourcePresets() {
     };
 }
 
+struct DemoStats {
+    double worst_ms = 0.0;
+    int rows = 0;
+    int phase_ok = 0;
+};
+
+void recordStats(DemoStats &stats, const TaskCase &task, const OptimizationIntent &intent, double latency_ms) {
+    stats.worst_ms = std::max(stats.worst_ms, latency_ms);
+    ++stats.rows;
+    if (intent.global.current_phase == task.expected) {
+        ++stats.phase_ok;
+    }
+}
+
 size_t alignDown(size_t value, size_t alignment) {
     return value / alignment * alignment;
 }
@@ -543,15 +557,13 @@ void printRow(const TaskCase &task, const OptimizationIntent &intent, double lat
                 phase_ok ? "" : "  phase-mismatch");
 }
 
-void runResourceReplay(
+DemoStats runResourceReplay(
     const DetectedDevice &dev,
-    const std::vector<TaskCase> &tasks,
-    double *worst_ms,
-    int *rows,
-    int *phase_ok) {
+    const std::vector<TaskCase> &tasks) {
     size_t free_bytes = 0;
     size_t total_bytes = 0;
     (void)infinirtGetMemInfo(dev.type, 0, &free_bytes, &total_bytes);
+    DemoStats stats;
 
     printRule('=');
     std::printf(" Resource Replay - explicit resource snapshots x task trace\n");
@@ -570,14 +582,12 @@ void runResourceReplay(
             double latency_ms = 0.0;
             auto intent = analyzeTaskWithSnapshots(task, dev, snapshots, &latency_ms);
             printRow(task, intent, latency_ms);
-            *worst_ms = std::max(*worst_ms, latency_ms);
-            ++(*rows);
-            if (intent.global.current_phase == task.expected) {
-                ++(*phase_ok);
-            }
+            recordStats(stats, task, intent, latency_ms);
         }
         std::putchar('\n');
     }
+
+    return stats;
 }
 
 void printInterpretation() {
@@ -621,9 +631,7 @@ int main(int argc, char **argv) {
 
     auto scenarios = buildLoadScenarios();
     auto tasks = buildTaskCases();
-    double worst_ms = 0.0;
-    int rows = 0;
-    int phase_ok = 0;
+    DemoStats live_stats;
 
     for (const auto &scenario : scenarios) {
         ScopedGpuLoad load;
@@ -641,11 +649,7 @@ int main(int argc, char **argv) {
             double latency_ms = 0.0;
             auto intent = analyzeTask(task, dev, &latency_ms);
             printRow(task, intent, latency_ms);
-            worst_ms = std::max(worst_ms, latency_ms);
-            ++rows;
-            if (intent.global.current_phase == task.expected) {
-                ++phase_ok;
-            }
+            recordStats(live_stats, task, intent, latency_ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(120));
         }
         std::putchar('\n');
@@ -653,11 +657,18 @@ int main(int argc, char **argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    runResourceReplay(dev, tasks, &worst_ms, &rows, &phase_ok);
+    DemoStats replay_stats = runResourceReplay(dev, tasks);
+    double worst_ms = std::max(live_stats.worst_ms, replay_stats.worst_ms);
     printInterpretation();
-    std::printf(" Summary: phase=%d/%d correct, worst analyze latency=%.2f ms, requirement=%s\n",
-                phase_ok,
-                rows,
+    std::printf(" Live Summary  : phase=%d/%d correct, worst analyze latency=%.2f ms\n",
+                live_stats.phase_ok,
+                live_stats.rows,
+                static_cast<float>(live_stats.worst_ms));
+    std::printf(" Replay Summary: phase=%d/%d correct, worst analyze latency=%.2f ms\n",
+                replay_stats.phase_ok,
+                replay_stats.rows,
+                static_cast<float>(replay_stats.worst_ms));
+    std::printf(" Requirement   : live+replay analyzer calls worst=%.2f ms, result=%s\n",
                 static_cast<float>(worst_ms),
                 worst_ms <= 10000.0 ? "PASSED" : "FAILED");
     return worst_ms <= 10000.0 ? 0 : 2;
