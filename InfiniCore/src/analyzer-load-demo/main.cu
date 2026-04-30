@@ -389,13 +389,13 @@ void printScenarioIntro(const LoadScenario &scenario, const ScopedGpuLoad &load)
     std::printf(" GPU Load: %s\n", scenario.name);
     std::printf(" Meaning : %s\n", scenario.description);
     if (load.heldBytes() > 0) {
-        std::printf(" Held memory : %.2f GiB\n", static_cast<double>(load.heldBytes()) / GiB);
+        std::printf(" Held memory : %.2f GiB\n", static_cast<float>(load.heldBytes()) / GiB);
     }
     if (load.copyBytes() > 0) {
-        std::printf(" Copy buffer : %.2f MiB x2\n", static_cast<double>(load.copyBytes()) / MiB);
+        std::printf(" Copy buffer : %.2f MiB x2\n", static_cast<float>(load.copyBytes()) / MiB);
     }
     if (load.computeBytes() > 0) {
-        std::printf(" Compute buf : %.2f MiB\n", static_cast<double>(load.computeBytes()) / MiB);
+        std::printf(" Compute buf : %.2f MiB\n", static_cast<float>(load.computeBytes()) / MiB);
     }
     printRule('-');
     std::printf("%-12s %-26s %-18s %-18s %-18s %7s %7s %7s %7s %9s\n",
@@ -416,7 +416,7 @@ void printRow(const TaskCase &task, const OptimizationIntent &intent, double lat
                 r.valid ? r.compute * 100.0f : 0.0f,
                 r.valid ? r.bandwidth * 100.0f : 0.0f,
                 r.valid ? r.confidence : 0.0f,
-                latency_ms,
+                static_cast<float>(latency_ms),
                 phase_ok ? "" : "  phase-mismatch");
 }
 
@@ -495,7 +495,7 @@ int main(int argc, char **argv) {
     std::printf(" Summary: phase=%d/%d correct, worst analyze latency=%.2f ms, requirement=%s\n",
                 phase_ok,
                 rows,
-                worst_ms,
+                static_cast<float>(worst_ms),
                 worst_ms <= 10000.0 ? "PASSED" : "FAILED");
     return worst_ms <= 10000.0 ? 0 : 2;
 }
