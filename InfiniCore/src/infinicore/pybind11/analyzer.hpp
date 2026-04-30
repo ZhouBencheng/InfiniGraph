@@ -92,6 +92,7 @@ inline void bind(py::module &m) {
     py::class_<DeviceLocalIntent>(analyzer_mod, "DeviceLocalIntent")
         .def(py::init<>())
         .def_readwrite("device_id", &DeviceLocalIntent::device_id)
+        .def_readwrite("device_name", &DeviceLocalIntent::device_name)
         .def_readwrite("memory_usage_ratio", &DeviceLocalIntent::memory_usage_ratio)
         .def_readwrite("memory_available_bytes", &DeviceLocalIntent::memory_available_bytes)
         .def_readwrite("local_bottleneck", &DeviceLocalIntent::local_bottleneck)
@@ -101,6 +102,7 @@ inline void bind(py::module &m) {
         .def_readwrite("resource_confidence", &DeviceLocalIntent::resource_confidence)
         .def("__repr__", [](const DeviceLocalIntent &d) {
             return "<DeviceLocalIntent dev=" + std::to_string(d.device_id)
+                 + " name=" + (d.device_name.empty() ? std::string("<unknown>") : d.device_name)
                  + " mem=" + std::to_string(d.memory_usage_ratio)
                  + " bottleneck=" + bottleneckTypeToString(d.local_bottleneck) + ">";
         });
