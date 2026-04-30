@@ -144,7 +144,8 @@ target("analyzer-load-demo")
     add_includedirs("include")
     add_files(os.projectdir().."/src/infinicore/device.cc")
     add_files(os.projectdir().."/src/infinicore/analyzer/*.cc")
-    add_files(os.projectdir().."/src/analyzer-load-demo/main.cu")
+    add_files(os.projectdir().."/src/analyzer-load-demo/main.cc")
+    add_files(os.projectdir().."/src/analyzer-load-demo/load_kernels.cu")
 
     if has_config("iluvatar-gpu") then
         set_toolchains("iluvatar.toolchain")

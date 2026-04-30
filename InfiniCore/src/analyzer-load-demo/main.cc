@@ -30,18 +30,7 @@ namespace {
 constexpr size_t MiB = 1024ull * 1024ull;
 constexpr size_t GiB = 1024ull * MiB;
 
-__global__ void computeLoadKernel(float *data, size_t n, int rounds) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t stride = blockDim.x * gridDim.x;
-    for (size_t i = tid; i < n; i += stride) {
-        float x = data[i];
-        for (int r = 0; r < rounds; ++r) {
-            x = fmaf(x, 1.000001f, 0.000001f);
-            x = fmaf(x, 0.999999f, 0.000002f);
-        }
-        data[i] = x;
-    }
-}
+extern "C" void analyzerLoadDemoLaunchCompute(float *data, size_t n, int rounds, cudaStream_t stream);
 
 struct DetectedDevice {
     infiniDevice_t type = INFINI_DEVICE_CPU;
@@ -333,7 +322,7 @@ private:
             if (compute_ != nullptr && compute_bytes_ > 0) {
                 auto *data = static_cast<float *>(compute_);
                 size_t n = compute_bytes_ / sizeof(float);
-                computeLoadKernel<<<4096, 256, 0, stream_>>>(data, n, 1024);
+                analyzerLoadDemoLaunchCompute(data, n, 1024, stream_);
             }
             if ((++iter % 4) == 0) {
                 cudaStreamSynchronize(stream_);
