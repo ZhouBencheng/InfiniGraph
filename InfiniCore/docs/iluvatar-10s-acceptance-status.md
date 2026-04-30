@@ -97,15 +97,16 @@ xmake run infinirt-test-analyzer-hw
 Device: Iluvatar x 1
 getMemInfo                 PASSED
 snapshot_memory            PASSED
+snapshot_device_name       PASSED (name=Iluvatar BI-V150)
 snapshot_utilization       PASSED (compute=0.0%, mem_bw=1.0%)
 snapshot_communication     PASSED
 event_timing               PASSED
 malloc_memcpy              PASSED
 multi_device_snapshot      PASSED (skip: need 2+ GPUs, have 1)
-Results: 7 passed, 0 failed
+Results: 8 passed, 0 failed
 ```
 
-这说明天数侧的基础 runtime、显存快照、IXML utilization、event timing、基础 memcpy 都已在实机路径上通过。
+这说明天数侧的基础 runtime、真实设备型号、显存快照、IXML utilization、event timing、基础 memcpy 都已在实机路径上通过。
 
 ### analyzer-demo
 
@@ -229,6 +230,7 @@ Summary: phase=25/25 correct, worst analyze latency=38.96 ms, requirement=PASSED
 当前边界：
 
 - `analyzer-load-demo` 的 GPU 负载是真实负载，资源读数是真实读数；任务 trace 是合成窗口，不等价于真实 LLM 生产推理 trace。
+- `analyzer-load-demo` 的 `Resource Replay` 段用于显式资源快照规则覆盖，不声称是真实 GPU 负载。
 - InfiniLM 侧调用点仍需接入 analyzer API，当前验证到 analyzer 模块自身和 demo 输出。
 - `kernel_time_ratio` 仍是由 compute utilization 估计，不是独立 profiler 字段。
 - 单卡 BI-V150 环境下多卡通信无法完全验证；通信结构和 event sample 路径已存在，单卡硬件测试中多设备项按预期 skip。

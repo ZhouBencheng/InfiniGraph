@@ -114,6 +114,7 @@ xmake run infinirt-test-analyzer-hw
 
 [TEST] getMemInfo                                    (free=31.9 GiB, total=32.0 GiB) PASSED
 [TEST] snapshot_memory                               (used=64.0 MiB, free=31936.0 MiB, total=32768.0 MiB) PASSED
+[TEST] snapshot_device_name                          (name=Iluvatar BI-V150) PASSED
 [TEST] snapshot_utilization                          (compute=0.0%, mem_bw=0.0%) PASSED
 [TEST] snapshot_communication                        (comm_ratio=0.000, comm_bytes=0) PASSED
 [TEST] event_timing                                  (elapsed=0.012 ms, status=0) PASSED
@@ -121,7 +122,7 @@ xmake run infinirt-test-analyzer-hw
 [TEST] multi_device_snapshot                         [dev0: 32.0GiB] [dev1: 32.0GiB] PASSED
 
 ========================================
- Results: 7 passed, 0 failed
+ Results: 8 passed, 0 failed
 ========================================
 ```
 

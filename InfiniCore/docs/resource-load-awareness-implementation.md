@@ -105,7 +105,7 @@
 | 资源快照 - kernel_time | 由 compute utilization 估计 | 由 compute utilization 估计 |
 | 资源快照 - communication | CUDA-like AllReduce event sampling | HCCL AllReduce event sampling |
 | 硬件层测试 | `infinirt-test-analyzer-hw` + `scripts/test_iluvatar_analyzer.sh` | `infinirt-test-analyzer-hw` + `scripts/test_metax_analyzer.sh` |
-| OpTrace 自动埋点 | `INFINICORE_GRAPH_OP_RECORD_OR_RUN` 已在生产 op 路径记录 | 同左；已补 `AllReduce -> ALLREDUCE` 注册 |
+| OpTrace 自动埋点 | `INFINICORE_GRAPH_OP_RECORD_OR_RUN` 已在生产 op 路径记录；运行时由 `setAnalyzerEnabled()` 控制是否真正写入 trace ring | 同左；已补 `AllReduce -> ALLREDUCE` 注册 |
 | `collectRuntimeResourceSnapshots()` | 枚举所有非 CPU runtime 设备并拉取快照 | 同左 |
 | 真实分析输出 demo | `src/analyzer-demo/main.cc` + `scripts/analyzer_demo.py --configure iluvatar`；`analyzer-load-demo` 支持真实 GPU 负载矩阵 | `src/analyzer-demo/main.cc` + `scripts/analyzer_demo.py --configure metax`；`analyzer-load-demo` 支持真实 GPU 负载矩阵 |
 | InfiniLM 集成 | Analyzer C++ API 已可调用；InfiniLM 侧仍需接入调用点 | 同左 |
@@ -120,6 +120,10 @@
   - MetaX AllReduce 事件采样与通信字节估计。
 - `src/infinicore/analyzer/mutual_awareness_analyzer.cc`
   - `collectRuntimeResourceSnapshots()` 汇总所有 runtime 设备快照。
+- `include/infinicore/analyzer/mutual_awareness_analyzer.hpp`
+  - 对外暴露 `setAnalyzerEnabled()`、`isAnalyzerEnabled()`、`analyzeCurrentState()`，用于实际计算路径低侵入接入。
+- `include/infinicore/analyzer/op_trace.hpp`
+  - `traceOp()` 是生产 op 路径的埋点入口；运行时关闭 analyzer 后会直接 no-op，不再写入 trace ring。
 - `include/infinicore/analyzer/op_type_registry.hpp`
   - 生产 OpTrace 的 class name 到 `OpType` 映射。
 - `src/analyzer-demo/main.cc`
@@ -131,6 +135,58 @@
   - 构建/运行真实 C++ demo 的薄入口，不再输出模拟数据。
 - `scripts/analyzer_load_demo.py`
   - 构建/运行不同 GPU 负载 x 不同任务 trace 的需求分析矩阵。
+
+## 接入方式：API 与开关
+
+资源负载感知模块按“两层开关”接入，避免强绑定到实际算子执行逻辑：
+
+1. 编译期开关：构建时打开 `--mutual-awareness=y` 后，生产 op 宏 `INFINICORE_GRAPH_OP_RECORD_OR_RUN` 会包含 trace hook；不打开时 hook 编译为空操作。
+2. 运行期开关：`setAnalyzerEnabled(false)` 会让 `analyze()` 返回默认 intent，同时让 `traceOp()` 直接 no-op，不再写入 `OpTraceRing`。算子本身仍照常执行。
+
+C++ 集成示例：
+
+```cpp
+#include "infinicore/analyzer/mutual_awareness_analyzer.hpp"
+
+using namespace infinicore::analyzer;
+
+// 服务启动或一次请求开始时启用。
+setAnalyzerEnabled(true);
+
+// 正常执行 InfiniCore op；生产路径中的 INFINICORE_GRAPH_OP_RECORD_OR_RUN
+// 会自动记录 op 类型、shape、dtype、device。
+run_model_step();
+
+// 需要调度/内存/通信策略决策时拉取一次需求分析结果。
+OptimizationIntent intent = analyzeCurrentState();
+for (const auto &device : intent.per_device) {
+    // device.device_name 来自 runtime 管理库，例如 Iluvatar BI-V150 / MetaX C500。
+    // device.local_bottleneck / memory_usage_ratio / compute_utilization 可供策略层消费。
+}
+
+// 不需要分析时关闭，关闭后 traceOp 不再写 ring。
+setAnalyzerEnabled(false);
+```
+
+Python 集成示例：
+
+```python
+from infinicore import analyzer
+
+analyzer.set_enabled(True)
+intent = analyzer.analyze()
+
+for device in intent.per_device:
+    print(device.device_name, device.local_bottleneck, device.memory_usage_ratio)
+
+analyzer.set_enabled(False)
+assert not analyzer.is_enabled()
+```
+
+显式资源快照接入：
+
+- 如果上层已经有自己的资源采样，可以调用 C++ `MutualAwarenessAnalyzer::analyze(std::vector<DeviceResourceSnapshot>)`。
+- `analyzer-load-demo` 的 `Resource Replay` 段就是这个路径的示例，用于规则覆盖和可重复展示；它不是 live GPU 负载。
 
 ## 验证命令
 
@@ -184,6 +240,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
 - `kernel_time_ratio` 当前由 compute utilization 估计，因此会在 `estimated_fields` 中标记。
 - 通信占比来自最近 1s 内已完成的 AllReduce event sample；没有通信或事件未完成时，通信字节为 0。
 - analyzer 输出会根据 valid bits 计算 `resource_confidence`，不会把缺失的管理库字段当成真实 0 利用率。
+- 关闭 analyzer 运行期开关后，`traceOp()` 不写入 ring，`analyze()` 返回默认 intent；这用于生产路径低侵入接入或临时关闭。
 
 ## 目标机到手后的快速判定
 
@@ -213,7 +270,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
 4. 当前实现验证仍看 extension utilization/memory、HCCL communication sampling、`analyzer-demo` 与 `analyzer-load-demo`；base MXSML 高阶字段暂作为增强候选。
 5. 如需展示不同 GPU 负载下的输出差异，运行 `analyzer-load-demo`。它会依次制造 idle、memory pressure、D2D copy、compute kernel、mixed 负载，并对 Prefill、Decode、GEMM/MLP、KV Cache、AllReduce trace 输出 phase / bottleneck / goal / live resource 表格。
 
-## MetaX C500 实测结果（2026-04-30）
+## MetaX C500 实测结果与待复核项（2026-04-30）
 
 测试命令：
 
@@ -222,11 +279,11 @@ cd /data/InfiniGraph/InfiniCore
 METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 ```
 
-结论：
+已记录结论：
 
 - 环境：`mx-smi 2.2.9`，MetaX C500 x1，MACA `3.2.1.10`，Kernel Mode Driver `3.0.11`。
 - MXSML extension 与 base 高阶符号均可见，`mxSmlExDeviceGetUtilization` / `mxSmlExDeviceGetMemoryInfo` 可用于当前资源快照。
-- `infinirt-test-analyzer-hw`：7 passed, 0 failed。
+- `infinirt-test-analyzer-hw`：当前文档不再沿用旧的硬件测试项数记录。当前测试代码已包含 `snapshot_device_name`，MetaX 目标机需要按本节命令重跑并确认当前应通过的硬件测试项数。
 - `analyzer-demo`：6/6 phase 正确，资源模块成功采集 1 个 MetaX 加速器，P99 `19.81 ms`，小于 10s。
 - `analyzer-load-demo`：真实负载 live 段 25/25 phase 正确，`Resource Replay` 段 25/25 phase 正确；整体最坏单次分析 `41.87 ms`，小于 10s。
 - `analyzer-test`：42 passed, 0 failed。
@@ -252,6 +309,17 @@ METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 - `kernel_time_ratio` 当前由 compute utilization 估计，不是独立 profiler 采样。
 - 单卡环境下 `ALLREDUCE` 任务 trace 只验证任务侧 communication phase；真实通信字节/占比需要多卡 HCCL/IXCCL 事件采样。
 - `Resource Replay` 用于规则覆盖和验收展示，不应写成真实 GPU 负载。
+
+## 未解决问题与后续项
+
+| 问题 | 当前状态 | 说明 |
+| --- | --- | --- |
+| MetaX 硬件测试项数复核 | 待重跑确认 | 当前 `infinirt-test-analyzer-hw` 已包含 `snapshot_device_name`，旧硬件测试项数不能继续作为当前证据。需要在 MetaX C500 目标机重新运行 `METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh`，并把实际 `Results:` 行更新到本节。 |
+| C API struct ABI 风险 | 未解决 | `infinirtDeviceResourceSnapshot_t` 当前把 `device_name` 放在 `device_id` 和 `valid_fields` 之间；如果外部程序用旧 header 编译、运行时链接新库，存在字段偏移错误风险。后续应改成 append-only 字段布局，或引入 `struct_size` / `version`。 |
+| InfiniLM 生产集成闭环 | 未解决 | 当前已验证 runtime snapshot、analyzer API、demo、硬件脚本；还不能声称 InfiniLM 真实推理路径已经自动消费 `OptimizationIntent` 并在 10s 内完成需求分析。 |
+| 管理库初始化线程安全 | 未解决 | Iluvatar IXML / MetaX MXSML 动态加载后的 `initialized` 状态仍是普通 bool；多线程首次调用 snapshot 时应改成 `std::call_once` 或加锁。 |
+| 多 GPU 通信压力验收 | 未解决 | 单卡环境只能验证 communication trace 和 event sample 结构；真实多卡 HCCL/NCCL/IXCCL 通信占比、通信字节和瓶颈切换仍需多卡目标机实测。 |
+| 分支交付状态 | 当前已解决，后续交付前仍需检查 | PR 分支应持续保持已推送且 `git status` clean。后续每次提交前仍需确认没有未提交 diff、临时文件或 ahead 未推送状态。 |
 
 ## 资料来源
 
