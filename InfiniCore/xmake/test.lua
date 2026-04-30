@@ -135,3 +135,37 @@ target("analyzer-demo")
 
     set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))
 target_end()
+
+target("analyzer-load-demo")
+    set_kind("binary")
+    set_default(false)
+    add_deps("infinirt")
+
+    add_includedirs("include")
+    add_files(os.projectdir().."/src/infinicore/device.cc")
+    add_files(os.projectdir().."/src/infinicore/analyzer/*.cc")
+    add_files(os.projectdir().."/src/analyzer-load-demo/main.cu")
+
+    if has_config("iluvatar-gpu") then
+        set_toolchains("iluvatar.toolchain")
+        add_rules("iluvatar.env")
+        set_values("cuda.rdc", false)
+        add_links("cudart")
+        add_cuflags("-fPIC", "-x", "ivcore", "-std=c++17", {force = true})
+        add_cuflags("--offload-arch=" .. (get_config("iluvatar_arch") or "native"), {force = true})
+        add_culdflags("-fPIC")
+        add_cxflags("-fPIC")
+        add_cxxflags("-fPIC")
+    elseif has_config("nv-gpu") then
+        set_policy("build.cuda.devlink", true)
+        add_links("cudart")
+        set_languages("cxx17")
+        add_cuflags("-std=c++17")
+    else
+        set_languages("cxx17")
+        add_links("cudart")
+    end
+
+    set_warnings("all", "error")
+    set_installdir(os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini"))
+target_end()

@@ -143,6 +143,7 @@ ixsmi
 find /usr/local/corex* -name 'libixml.so*' -o -name 'libixdcgm.so*'
 bash scripts/test_iluvatar_analyzer.sh
 python3 scripts/analyzer_demo.py --configure iluvatar
+python3 scripts/analyzer_load_demo.py --configure iluvatar
 ```
 
 MetaX 目标机：
@@ -183,6 +184,7 @@ python3 scripts/analyzer_demo.py --configure metax --extra-config --use-mc=y
    - 初始化/连接：`dcgmInit`、`dcgmShutdown`、`dcgmStartEmbedded`、`dcgmConnect`。
    - 指标：`dcgmGetLatestValuesForFields`、`dcgmWatchFields`、`dcgmGetDeviceAttributes`。
 4. 当前实现验证看 `infinirt-test-analyzer-hw` 与 `analyzer-demo` 输出；IXDCGM 字段暂作为增强候选，不影响主线通过/失败。
+5. 如需展示不同 GPU 负载下的输出差异，运行 `analyzer-load-demo`。它会依次制造 idle、memory pressure、D2D copy、compute kernel、mixed 负载，并对 Prefill、Decode、GEMM/MLP、KV Cache、AllReduce trace 输出 phase / bottleneck / goal / live resource 表格。
 
 ### 沐曦 MetaX
 
