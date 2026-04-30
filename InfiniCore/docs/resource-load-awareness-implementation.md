@@ -270,7 +270,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
 4. 当前实现验证仍看 extension utilization/memory、HCCL communication sampling、`analyzer-demo` 与 `analyzer-load-demo`；base MXSML 高阶字段暂作为增强候选。
 5. 如需展示不同 GPU 负载下的输出差异，运行 `analyzer-load-demo`。它会依次制造 idle、memory pressure、D2D copy、compute kernel、mixed 负载，并对 Prefill、Decode、GEMM/MLP、KV Cache、AllReduce trace 输出 phase / bottleneck / goal / live resource 表格。
 
-## MetaX C500 实测结果与待复核项（2026-04-30）
+## MetaX C500 实测结果（2026-04-30 重跑确认）
 
 测试命令：
 
@@ -283,10 +283,10 @@ METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 
 - 环境：`mx-smi 2.2.9`，MetaX C500 x1，MACA `3.2.1.10`，Kernel Mode Driver `3.0.11`。
 - MXSML extension 与 base 高阶符号均可见，`mxSmlExDeviceGetUtilization` / `mxSmlExDeviceGetMemoryInfo` 可用于当前资源快照。
-- `infinirt-test-analyzer-hw`：当前文档不再沿用旧的硬件测试项数记录。当前测试代码已包含 `snapshot_device_name`，MetaX 目标机需要按本节命令重跑并确认当前应通过的硬件测试项数。
-- `analyzer-demo`：6/6 phase 正确，资源模块成功采集 1 个 MetaX 加速器，P99 `19.81 ms`，小于 10s。
-- `analyzer-load-demo`：真实负载 live 段 25/25 phase 正确，`Resource Replay` 段 25/25 phase 正确；整体最坏单次分析 `41.87 ms`，小于 10s。
-- `analyzer-test`：42 passed, 0 failed。
+- `infinirt-test-analyzer-hw`：8 passed, 0 failed；其中 `snapshot_device_name` 通过，运行时读取到设备名 `MXC500`；`multi_device_snapshot` 在单卡环境按预期 skip 后计为通过。
+- `analyzer-demo`：6/6 phase 正确，资源模块成功采集 1 个 MetaX 加速器，P99 `0.67 ms`，max `1.70 ms`，小于 10s。
+- `analyzer-load-demo`：真实负载 live 段 25/25 phase 正确，`Resource Replay` 段 25/25 phase 正确；live+replay 最坏单次分析 `21.98 ms`，小于 10s。
+- `analyzer-test`：43 passed, 0 failed。
 
 `analyzer-load-demo` 的真实负载段显示 MetaX 管理库读数会随负载变化：
 
@@ -294,7 +294,7 @@ METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 | --- | --- | --- |
 | idle | mem `1.3%`, gpu `0.0%`, bw `1.0%` | 空闲基线 |
 | memory_pressure | held `13.23 GiB`, mem `21.9%`, bw `21.0%` | 当前 MACA runtime 对单进程可分配显存存在上限，demo 记录真实可达压力 |
-| bandwidth_copy | mem `2.8%`, gpu `41.0%`, bw `2.0%` | D2D copy 在该驱动上主要反映到 GPU utilization |
+| bandwidth_copy | mem `2.8%`, gpu `40.0%`, bw `2.0%` | D2D copy 在该驱动上主要反映到 GPU utilization |
 | compute_kernel | mem `1.5%`, gpu `98.0%`, bw `1.0%` | MetaX `.maca` 计算压测能打满 compute utilization |
 | mixed | held `9.73 GiB`, mem `18.2%`, gpu `91.0%`, bw `18.0%` | 显存持有 + copy + compute 的组合压力 |
 
@@ -314,7 +314,7 @@ METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh
 
 | 问题 | 当前状态 | 说明 |
 | --- | --- | --- |
-| MetaX 硬件测试项数复核 | 待重跑确认 | 当前 `infinirt-test-analyzer-hw` 已包含 `snapshot_device_name`，旧硬件测试项数不能继续作为当前证据。需要在 MetaX C500 目标机重新运行 `METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh`，并把实际 `Results:` 行更新到本节。 |
+| MetaX 硬件测试项数复核 | 已解决 | 2026-04-30 已在 MetaX C500 目标机重跑 `METAX_USE_MC=1 bash scripts/test_metax_analyzer.sh`，当前 `infinirt-test-analyzer-hw` 实测为 8 passed, 0 failed，包含 `snapshot_device_name`。 |
 | C API struct ABI 风险 | 未解决 | `infinirtDeviceResourceSnapshot_t` 当前把 `device_name` 放在 `device_id` 和 `valid_fields` 之间；如果外部程序用旧 header 编译、运行时链接新库，存在字段偏移错误风险。后续应改成 append-only 字段布局，或引入 `struct_size` / `version`。 |
 | InfiniLM 生产集成闭环 | 未解决 | 当前已验证 runtime snapshot、analyzer API、demo、硬件脚本；还不能声称 InfiniLM 真实推理路径已经自动消费 `OptimizationIntent` 并在 10s 内完成需求分析。 |
 | 管理库初始化线程安全 | 未解决 | Iluvatar IXML / MetaX MXSML 动态加载后的 `initialized` 状态仍是普通 bool；多线程首次调用 snapshot 时应改成 `std::call_once` 或加锁。 |
