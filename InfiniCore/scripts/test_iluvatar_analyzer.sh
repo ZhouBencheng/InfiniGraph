@@ -64,6 +64,7 @@ if [ -n "$IXML_PATH" ]; then
     NVML_INIT=$(symbol_count "$IXML_PATH" "nvmlInit_v2")
     NVML_UTIL=$(symbol_count "$IXML_PATH" "nvmlDeviceGetUtilizationRates")
     NVML_HANDLE=$(symbol_count "$IXML_PATH" "nvmlDeviceGetHandleByIndex_v2")
+    NVML_NAME=$(symbol_count "$IXML_PATH" "nvmlDeviceGetName")
     NVML_MEM=$(symbol_count "$IXML_PATH" "nvmlDeviceGetMemoryInfo")
     NVML_PCIE=$(symbol_count "$IXML_PATH" "nvmlDeviceGetPcieThroughput")
     NVML_POWER=$(symbol_count "$IXML_PATH" "nvmlDeviceGetPowerUsage")
@@ -73,6 +74,7 @@ if [ -n "$IXML_PATH" ]; then
     echo "  IXML / NVML-compatible 符号检查:"
     echo "    nvmlInit_v2:                   $NVML_INIT"
     echo "    nvmlDeviceGetHandleByIndex_v2: $NVML_HANDLE"
+    echo "    nvmlDeviceGetName:             $NVML_NAME"
     echo "    nvmlDeviceGetUtilizationRates: $NVML_UTIL"
     echo "    nvmlDeviceGetMemoryInfo:       $NVML_MEM"
     echo "    nvmlDeviceGetPcieThroughput:   $NVML_PCIE"
@@ -81,10 +83,11 @@ if [ -n "$IXML_PATH" ]; then
     echo "    nvmlShutdown:                  $NVML_SHUTDOWN"
 
     if [ "$NVML_INIT" -gt 0 ] && [ "$NVML_HANDLE" -gt 0 ] && \
-       [ "$NVML_UTIL" -gt 0 ] && [ "$NVML_MEM" -gt 0 ] && [ "$NVML_SHUTDOWN" -gt 0 ]; then
+       [ "$NVML_NAME" -gt 0 ] && [ "$NVML_UTIL" -gt 0 ] && \
+       [ "$NVML_MEM" -gt 0 ] && [ "$NVML_SHUTDOWN" -gt 0 ]; then
         pass "IXML 核心资源符号完整"
     else
-        warn "IXML 核心符号缺失 — memory / utilization 查询可能降级"
+        warn "IXML 核心符号缺失 — device name / memory / utilization 查询可能降级"
     fi
 
     if [ "$NVML_PCIE" -gt 0 ] && [ "$NVML_POWER" -gt 0 ] && [ "$NVML_TEMP" -gt 0 ]; then

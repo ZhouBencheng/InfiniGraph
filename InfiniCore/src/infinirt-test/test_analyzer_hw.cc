@@ -109,7 +109,38 @@ static bool test_snapshot_memory() {
 }
 
 // ============================================================
-// Test 3: getDeviceResourceSnapshot — utilization (NVML/IXML/MXSML)
+// Test 3: getDeviceResourceSnapshot — real device/product name
+// ============================================================
+
+static bool test_snapshot_device_name() {
+    if (g_device_count == 0) { printf("(skip: no GPU) "); return true; }
+
+    infinirtDeviceResourceSnapshot_t snap{};
+    auto status = infinirtGetDeviceResourceSnapshot(g_device_type, 0, &snap);
+    if (status != INFINI_STATUS_SUCCESS) {
+        printf("(snapshot returned %d) ", status);
+        return false;
+    }
+
+    if (!(snap.valid_fields & INFINIRT_RESOURCE_FIELD_DEVICE_NAME)) {
+        printf("(DEVICE_NAME flag not set) ");
+        return false;
+    }
+    if (snap.device_name[0] == '\0') {
+        printf("(device_name empty) ");
+        return false;
+    }
+    if (std::strlen(snap.device_name) >= INFINIRT_DEVICE_NAME_MAX) {
+        printf("(device_name not bounded) ");
+        return false;
+    }
+
+    printf("(name=%s) ", snap.device_name);
+    return true;
+}
+
+// ============================================================
+// Test 4: getDeviceResourceSnapshot — utilization (NVML/IXML/MXSML)
 // ============================================================
 
 static bool test_snapshot_utilization() {
@@ -139,7 +170,7 @@ static bool test_snapshot_utilization() {
 }
 
 // ============================================================
-// Test 4: getDeviceResourceSnapshot — communication baseline
+// Test 5: getDeviceResourceSnapshot — communication baseline
 // ============================================================
 
 static bool test_snapshot_communication() {
@@ -160,7 +191,7 @@ static bool test_snapshot_communication() {
 }
 
 // ============================================================
-// Test 5: event create / record / elapsed time
+// Test 6: event create / record / elapsed time
 // ============================================================
 
 static bool test_event_timing() {
@@ -213,7 +244,7 @@ static bool test_event_timing() {
 }
 
 // ============================================================
-// Test 6: malloc / memcpy round-trip
+// Test 7: malloc / memcpy round-trip
 // ============================================================
 
 static bool test_malloc_memcpy() {
@@ -256,7 +287,7 @@ static bool test_malloc_memcpy() {
 }
 
 // ============================================================
-// Test 7: multi-device snapshot
+// Test 8: multi-device snapshot
 // ============================================================
 
 static bool test_multi_device_snapshot() {
@@ -300,6 +331,7 @@ int main() {
 
     RUN(getMemInfo);
     RUN(snapshot_memory);
+    RUN(snapshot_device_name);
     RUN(snapshot_utilization);
     RUN(snapshot_communication);
     RUN(event_timing);

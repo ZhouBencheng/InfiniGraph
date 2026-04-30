@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -180,6 +181,7 @@ using NvmlInitV2Fn = nvmlReturn_t (*)();
 using NvmlShutdownFn = nvmlReturn_t (*)();
 using NvmlDeviceGetHandleByIndexV2Fn = nvmlReturn_t (*)(unsigned int, nvmlDevice_t *);
 using NvmlDeviceGetUtilizationRatesFn = nvmlReturn_t (*)(nvmlDevice_t, nvmlUtilization_t *);
+using NvmlDeviceGetNameFn = nvmlReturn_t (*)(nvmlDevice_t, char *, unsigned int);
 
 struct NvmlApi {
     void *handle = nullptr;
@@ -187,6 +189,7 @@ struct NvmlApi {
     NvmlShutdownFn shutdown = nullptr;
     NvmlDeviceGetHandleByIndexV2Fn get_handle_by_index_v2 = nullptr;
     NvmlDeviceGetUtilizationRatesFn get_utilization_rates = nullptr;
+    NvmlDeviceGetNameFn get_name = nullptr;
     bool available = false;
     bool initialized = false;
 };
@@ -219,18 +222,16 @@ NvmlApi &nvmlApi() {
         loaded.shutdown = reinterpret_cast<NvmlShutdownFn>(dlsym(loaded.handle, "nvmlShutdown"));
         loaded.get_handle_by_index_v2 = reinterpret_cast<NvmlDeviceGetHandleByIndexV2Fn>(dlsym(loaded.handle, "nvmlDeviceGetHandleByIndex_v2"));
         loaded.get_utilization_rates = reinterpret_cast<NvmlDeviceGetUtilizationRatesFn>(dlsym(loaded.handle, "nvmlDeviceGetUtilizationRates"));
+        loaded.get_name = reinterpret_cast<NvmlDeviceGetNameFn>(dlsym(loaded.handle, "nvmlDeviceGetName"));
 
         loaded.available = loaded.init_v2 != nullptr
-                           && loaded.shutdown != nullptr
-                           && loaded.get_handle_by_index_v2 != nullptr
-                           && loaded.get_utilization_rates != nullptr;
+                           && loaded.get_handle_by_index_v2 != nullptr;
         return loaded;
     }();
     return api;
 }
 
-bool tryPopulateNvmlUtilization(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
-    auto &api = nvmlApi();
+bool ensureNvmlInitialized(NvmlApi &api) {
     if (!api.available) {
         return false;
     }
@@ -241,9 +242,45 @@ bool tryPopulateNvmlUtilization(int device_id, infinirtDeviceResourceSnapshot_t 
         }
         api.initialized = true;
     }
+    return true;
+}
+
+bool getNvmlDevice(NvmlApi &api, int device_id, nvmlDevice_t *device) {
+    if (device == nullptr || !ensureNvmlInitialized(api)) {
+        return false;
+    }
+    return api.get_handle_by_index_v2(static_cast<unsigned int>(device_id), device) == NVML_SUCCESS;
+}
+
+bool tryPopulateNvmlDeviceName(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &api = nvmlApi();
+    if (api.get_name == nullptr) {
+        return false;
+    }
 
     nvmlDevice_t device = nullptr;
-    if (api.get_handle_by_index_v2(static_cast<unsigned int>(device_id), &device) != NVML_SUCCESS) {
+    if (!getNvmlDevice(api, device_id, &device)) {
+        return false;
+    }
+
+    char name[INFINIRT_DEVICE_NAME_MAX] = {};
+    if (api.get_name(device, name, static_cast<unsigned int>(sizeof(name))) != NVML_SUCCESS || name[0] == '\0') {
+        return false;
+    }
+
+    std::snprintf(snapshot->device_name, sizeof(snapshot->device_name), "%s", name);
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_DEVICE_NAME;
+    return true;
+}
+
+bool tryPopulateNvmlUtilization(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &api = nvmlApi();
+    if (api.get_utilization_rates == nullptr) {
+        return false;
+    }
+
+    nvmlDevice_t device = nullptr;
+    if (!getNvmlDevice(api, device_id, &device)) {
         return false;
     }
 
@@ -347,6 +384,7 @@ infiniStatus_t getDeviceResourceSnapshot(int device_id, infinirtDeviceResourceSn
     snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY;
 
 #if !defined(_WIN32) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_ILUVATAR_API))
+    (void)tryPopulateNvmlDeviceName(device_id, snapshot);
     (void)tryPopulateNvmlUtilization(device_id, snapshot);
 #endif
     populateCommunicationSnapshot(device_id, snapshot);

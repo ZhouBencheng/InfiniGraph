@@ -17,11 +17,15 @@ typedef enum {
     INFINIRT_RESOURCE_FIELD_MEMORY_BANDWIDTH_UTILIZATION = 1ull << 2,
     INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO = 1ull << 3,
     INFINIRT_RESOURCE_FIELD_COMMUNICATION = 1ull << 4,
+    INFINIRT_RESOURCE_FIELD_DEVICE_NAME = 1ull << 5,
 } infinirtResourceField_t;
+
+#define INFINIRT_DEVICE_NAME_MAX 96
 
 typedef struct {
     infiniDevice_t device_type;
     int device_id;
+    char device_name[INFINIRT_DEVICE_NAME_MAX];
 
     uint64_t valid_fields;
     uint64_t estimated_fields;

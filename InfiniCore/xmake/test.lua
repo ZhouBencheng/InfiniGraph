@@ -151,6 +151,9 @@ if has_config("iluvatar-gpu") or has_config("nv-gpu") or has_config("metax-gpu")
         if has_config("metax-gpu") then
             add_defines("ANALYZER_LOAD_DEMO_HAS_COMPUTE_KERNEL")
             add_files(os.projectdir().."/src/analyzer-load-demo/load_kernels.maca", {rule = "maca"})
+            if has_config("use-mc") then
+                add_links("mccompiler")
+            end
             add_cxflags("-fPIC")
             add_cxxflags("-fPIC")
         elseif has_config("iluvatar-gpu") then

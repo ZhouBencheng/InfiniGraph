@@ -35,7 +35,7 @@ extern "C" void analyzerLoadDemoLaunchCompute(float *data, size_t n, int rounds,
 struct DetectedDevice {
     infiniDevice_t type = INFINI_DEVICE_CPU;
     int count = 0;
-    const char *name = "CPU";
+    std::string name = "CPU";
 };
 
 const char *deviceTypeName(infiniDevice_t t) {
@@ -47,6 +47,22 @@ const char *deviceTypeName(infiniDevice_t t) {
     }
 }
 
+std::string deviceDisplayName(infiniDevice_t t, int device_id) {
+    if (t == INFINI_DEVICE_CPU) {
+        return deviceTypeName(t);
+    }
+
+    infinirtDeviceResourceSnapshot_t snapshot{};
+    auto status = infinirtGetDeviceResourceSnapshot(t, device_id, &snapshot);
+    if (status == INFINI_STATUS_SUCCESS
+        && (snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_DEVICE_NAME)
+        && snapshot.device_name[0] != '\0') {
+        return snapshot.device_name;
+    }
+
+    return std::string(deviceTypeName(t)) + " (model unavailable)";
+}
+
 DetectedDevice detectAccelerator() {
     infiniDevice_t order[] = {
         INFINI_DEVICE_ILUVATAR,
@@ -56,7 +72,7 @@ DetectedDevice detectAccelerator() {
     for (auto t : order) {
         int count = 0;
         if (infinirtGetDeviceCount(t, &count) == INFINI_STATUS_SUCCESS && count > 0) {
-            return {t, count, deviceTypeName(t)};
+            return {t, count, deviceDisplayName(t, 0)};
         }
     }
     return {};
@@ -169,6 +185,7 @@ std::vector<LoadScenario> buildLoadScenarios() {
 
 struct ResourceView {
     bool valid = false;
+    BottleneckType local_bottleneck = BottleneckType::BALANCED;
     float memory_usage = 0.0f;
     float compute = 0.0f;
     float bandwidth = 0.0f;
@@ -184,6 +201,7 @@ ResourceView firstResource(const OptimizationIntent &intent) {
     }
     const auto &d = intent.per_device.front();
     view.valid = true;
+    view.local_bottleneck = d.local_bottleneck;
     view.memory_usage = d.memory_usage_ratio;
     view.compute = d.compute_utilization;
     view.bandwidth = d.memory_bandwidth_utilization;
@@ -191,6 +209,25 @@ ResourceView firstResource(const OptimizationIntent &intent) {
     view.confidence = d.resource_confidence;
     view.free_bytes = d.memory_available_bytes;
     return view;
+}
+
+struct ResourcePreset {
+    const char *name;
+    const char *description;
+    float memory_usage;
+    float compute_utilization;
+    float bandwidth_utilization;
+    float communication_ratio;
+};
+
+std::vector<ResourcePreset> buildResourcePresets() {
+    return {
+        {"replay_low", "explicit low-load resource snapshot", 0.10f, 0.05f, 0.05f, 0.00f},
+        {"replay_memory_saturated", "explicit high-memory snapshot", 0.92f, 0.10f, 0.20f, 0.00f},
+        {"replay_compute_saturated", "explicit high-compute snapshot", 0.10f, 0.95f, 0.10f, 0.00f},
+        {"replay_bandwidth_saturated", "explicit high-bandwidth snapshot", 0.10f, 0.20f, 0.95f, 0.00f},
+        {"replay_comm_saturated", "explicit high-communication snapshot", 0.10f, 0.20f, 0.20f, 0.40f},
+    };
 }
 
 size_t alignDown(size_t value, size_t alignment) {
@@ -219,6 +256,8 @@ bool allocateWithBackoff(void **ptr, size_t &bytes) {
     return false;
 }
 
+constexpr size_t kMemoryPressureChunkBytes = 2 * GiB;
+
 class ScopedGpuLoad {
 public:
     ScopedGpuLoad() = default;
@@ -244,9 +283,9 @@ public:
         if (mode == LoadMode::MemoryPressure || mode == LoadMode::Mixed) {
             size_t current_used = total_bytes > free_bytes ? total_bytes - free_bytes : 0;
             size_t target_used = static_cast<size_t>(static_cast<double>(total_bytes) * (mode == LoadMode::Mixed ? 0.65 : 0.88));
-            hold_bytes_ = target_used > current_used ? target_used - current_used : 0;
-            hold_bytes_ = std::min(hold_bytes_, free_bytes > GiB ? free_bytes - GiB : free_bytes / 2);
-            if (!allocateWithBackoff(&hold_, hold_bytes_)) {
+            size_t target_hold = target_used > current_used ? target_used - current_used : 0;
+            target_hold = std::min(target_hold, free_bytes > GiB ? free_bytes - GiB : free_bytes / 2);
+            if (!allocateMemoryPressure(target_hold)) {
                 std::fprintf(stderr, "[analyzer-load-demo] memory pressure allocation unavailable\n");
                 return failStart();
             }
@@ -297,15 +336,18 @@ public:
         if (copy_a_) (void)infinirtFree(copy_a_);
         if (copy_b_) (void)infinirtFree(copy_b_);
         if (compute_) (void)infinirtFree(compute_);
-        if (hold_) (void)infinirtFree(hold_);
+        for (void *block : hold_blocks_) {
+            (void)infinirtFree(block);
+        }
+        hold_blocks_.clear();
         copy_a_ = nullptr;
         copy_b_ = nullptr;
         compute_ = nullptr;
-        hold_ = nullptr;
         if (stream_ != nullptr) {
             (void)infinirtStreamDestroy(stream_);
             stream_ = nullptr;
         }
+        hold_bytes_ = 0;
     }
 
     size_t heldBytes() const { return hold_bytes_; }
@@ -313,6 +355,22 @@ public:
     size_t computeBytes() const { return compute_bytes_; }
 
 private:
+    bool allocateMemoryPressure(size_t target_bytes) {
+        target_bytes = alignDown(target_bytes, MiB);
+        size_t remaining = target_bytes;
+        while (remaining >= 64 * MiB) {
+            size_t chunk_bytes = std::min(remaining, kMemoryPressureChunkBytes);
+            void *block = nullptr;
+            if (!allocateWithBackoff(&block, chunk_bytes)) {
+                break;
+            }
+            hold_blocks_.push_back(block);
+            hold_bytes_ += chunk_bytes;
+            remaining = remaining > chunk_bytes ? remaining - chunk_bytes : 0;
+        }
+        return hold_bytes_ > 0;
+    }
+
     bool failStart() {
         stop();
         return false;
@@ -344,7 +402,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread worker_;
     infinirtStream_t stream_ = nullptr;
-    void *hold_ = nullptr;
+    std::vector<void *> hold_blocks_;
     void *copy_a_ = nullptr;
     void *copy_b_ = nullptr;
     void *compute_ = nullptr;
@@ -371,14 +429,69 @@ OptimizationIntent analyzeTask(const TaskCase &task, const DetectedDevice &dev, 
     return intent;
 }
 
+OptimizationIntent analyzeTaskWithSnapshots(
+    const TaskCase &task,
+    const DetectedDevice &dev,
+    const std::vector<DeviceResourceSnapshot> &snapshots,
+    double *latency_ms) {
+    auto &trace = getGlobalOpTrace();
+    auto &analyzer = MutualAwarenessAnalyzer::instance();
+    trace.clear();
+    analyzer.clearGraphCache();
+
+    std::vector<size_t> shape = {1u, 32u, task.seq_len};
+    for (auto op : task.ops) {
+        injectOp(op, shape, static_cast<uint8_t>(dev.type), 0);
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto intent = analyzer.analyze(snapshots);
+    auto t1 = std::chrono::steady_clock::now();
+    *latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    return intent;
+}
+
+DeviceResourceSnapshot makeReplaySnapshot(
+    const DetectedDevice &dev,
+    const ResourcePreset &preset,
+    size_t total_bytes) {
+    if (total_bytes == 0) {
+        total_bytes = 64 * GiB;
+    }
+    size_t used_bytes = static_cast<size_t>(static_cast<double>(total_bytes) * preset.memory_usage);
+    used_bytes = std::min(used_bytes, total_bytes);
+
+    DeviceResourceSnapshot snapshot;
+    snapshot.device_id = 0;
+    snapshot.device_type = static_cast<infinicore::Device::Type>(dev.type);
+    snapshot.device_name = dev.name;
+    snapshot.has_memory_capacity = true;
+    snapshot.has_compute_utilization = true;
+    snapshot.has_memory_bandwidth_utilization = true;
+    snapshot.has_kernel_time_ratio = true;
+    snapshot.has_communication = true;
+    snapshot.kernel_time_estimated = true;
+    snapshot.free_bytes = total_bytes - used_bytes;
+    snapshot.total_bytes = total_bytes;
+    snapshot.used_bytes = used_bytes;
+    snapshot.reserved_bytes = total_bytes;
+    snapshot.compute_utilization = preset.compute_utilization;
+    snapshot.memory_bandwidth_utilization = preset.bandwidth_utilization;
+    snapshot.kernel_time_ratio = preset.compute_utilization;
+    snapshot.communication_time_ratio = preset.communication_ratio;
+    snapshot.communication_bytes = preset.communication_ratio > 0.0f ? 256 * MiB : 0;
+    return snapshot;
+}
+
 void printHeader(const DetectedDevice &dev) {
     printRule('=');
     std::printf(" Analyzer Load Demo - different GPU load x different task trace\n");
     printRule('=');
-    std::printf(" Device          : %d x %s\n", dev.count, dev.name);
+    std::printf(" Device          : %d x %s\n", dev.count, dev.name.c_str());
     std::printf(" Resource source : infinirtGetDeviceResourceSnapshot() -> backend management fields\n");
     std::printf(" Task source     : synthetic OpTrace windows for phase/goal comparison\n");
     std::printf(" Requirement     : analyze() must finish within 10 seconds\n");
+    std::printf(" Replay section  : explicit resource snapshots for deterministic rule coverage\n");
     printRule('=');
     std::putchar('\n');
 }
@@ -397,20 +510,31 @@ void printScenarioIntro(const LoadScenario &scenario, const ScopedGpuLoad &load)
         std::printf(" Compute buf : %.2f MiB\n", static_cast<float>(load.computeBytes()) / MiB);
     }
     printRule('-');
-    std::printf("%-12s %-26s %-18s %-18s %-18s %7s %7s %7s %7s %9s\n",
-                "task", "trace", "phase", "bottleneck", "goal",
+    std::printf("%-12s %-26s %-18s %-18s %-18s %-18s %7s %7s %7s %7s %9s\n",
+                "task", "trace", "phase", "global_bn", "goal", "local_bn",
+                "mem%", "gpu%", "bw%", "conf", "ms");
+}
+
+void printReplayIntro(const ResourcePreset &preset) {
+    printRule('-');
+    std::printf(" Resource Replay: %s\n", preset.name);
+    std::printf(" Meaning        : %s\n", preset.description);
+    printRule('-');
+    std::printf("%-12s %-26s %-18s %-18s %-18s %-18s %7s %7s %7s %7s %9s\n",
+                "task", "trace", "phase", "global_bn", "goal", "local_bn",
                 "mem%", "gpu%", "bw%", "conf", "ms");
 }
 
 void printRow(const TaskCase &task, const OptimizationIntent &intent, double latency_ms) {
     auto r = firstResource(intent);
     bool phase_ok = intent.global.current_phase == task.expected;
-    std::printf("%-12s %-26s %-18s %-18s %-18s %6.1f%% %6.1f%% %6.1f%% %7.2f %9.2f%s\n",
+    std::printf("%-12s %-26s %-18s %-18s %-18s %-18s %6.1f%% %6.1f%% %6.1f%% %7.2f %9.2f%s\n",
                 task.name,
                 task.summary,
                 phaseStr(intent.global.current_phase),
                 bottleneckStr(intent.global.primary_bottleneck),
                 goalStr(intent.global.goal),
+                r.valid ? bottleneckStr(r.local_bottleneck) : "n/a",
                 r.valid ? r.memory_usage * 100.0f : 0.0f,
                 r.valid ? r.compute * 100.0f : 0.0f,
                 r.valid ? r.bandwidth * 100.0f : 0.0f,
@@ -419,14 +543,54 @@ void printRow(const TaskCase &task, const OptimizationIntent &intent, double lat
                 phase_ok ? "" : "  phase-mismatch");
 }
 
+void runResourceReplay(
+    const DetectedDevice &dev,
+    const std::vector<TaskCase> &tasks,
+    double *worst_ms,
+    int *rows,
+    int *phase_ok) {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    (void)infinirtGetMemInfo(dev.type, 0, &free_bytes, &total_bytes);
+
+    printRule('=');
+    std::printf(" Resource Replay - explicit resource snapshots x task trace\n");
+    printRule('=');
+    std::printf(" These rows do not claim live GPU load. They exercise the analyzer's explicit\n");
+    std::printf(" resource-snapshot API so saturation decisions are testable even when a\n");
+    std::printf(" platform caps per-process allocation or utilization counters are coarse.\n");
+    std::putchar('\n');
+
+    for (const auto &preset : buildResourcePresets()) {
+        auto snapshot = makeReplaySnapshot(dev, preset, total_bytes);
+        std::vector<DeviceResourceSnapshot> snapshots = {snapshot};
+
+        printReplayIntro(preset);
+        for (const auto &task : tasks) {
+            double latency_ms = 0.0;
+            auto intent = analyzeTaskWithSnapshots(task, dev, snapshots, &latency_ms);
+            printRow(task, intent, latency_ms);
+            *worst_ms = std::max(*worst_ms, latency_ms);
+            ++(*rows);
+            if (intent.global.current_phase == task.expected) {
+                ++(*phase_ok);
+            }
+        }
+        std::putchar('\n');
+    }
+}
+
 void printInterpretation() {
     printRule('=');
     std::printf(" Reading the table\n");
     printRule('=');
     std::printf(" - Rows under the same GPU Load show how task semantics change phase/bottleneck/goal.\n");
     std::printf(" - Columns mem%%/gpu%%/bw%% are live resource readings from the accelerator.\n");
-    std::printf(" - memory_pressure should push most tasks toward memory_bound + memory_safe.\n");
+    std::printf(" - memory_pressure allocates toward 88%%; if the runtime caps per-process allocation,\n");
+    std::printf("   the table reports the achieved held memory instead of faking saturation.\n");
     std::printf(" - compute/copy/mixed loads expose whether the backend reports high compute or bandwidth pressure.\n");
+    std::printf(" - Resource Replay rows are explicit snapshots and show deterministic output changes\n");
+    std::printf("   such as memory_bound/memory_safe and communication_bound/stability_first.\n");
     std::printf(" - ms is end-to-end MutualAwarenessAnalyzer::analyze() latency; requirement is <= 10000 ms.\n");
     printRule('=');
 }
@@ -489,6 +653,7 @@ int main(int argc, char **argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
+    runResourceReplay(dev, tasks, &worst_ms, &rows, &phase_ok);
     printInterpretation();
     std::printf(" Summary: phase=%d/%d correct, worst analyze latency=%.2f ms, requirement=%s\n",
                 phase_ok,

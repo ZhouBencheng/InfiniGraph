@@ -86,6 +86,7 @@ if [ -n "$MXSML_PATH" ]; then
 
     MXSML_INIT=$(symbol_count "$MXSML_PATH" "mxSmlExInit")
     MXSML_HANDLE=$(symbol_count "$MXSML_PATH" "mxSmlExGetDeviceHandleByIndex")
+    MXSML_NAME=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetName")
     MXSML_UTIL=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetUtilization")
     MXSML_MEM=$(symbol_count "$MXSML_PATH" "mxSmlExDeviceGetMemoryInfo")
     MXSML_PCIE=$(symbol_count "$MXSML_PATH" "mxSmlExGetPcieThroughput")
@@ -97,6 +98,7 @@ if [ -n "$MXSML_PATH" ]; then
     echo "  MXSML extension 符号检查:"
     echo "    mxSmlExInit:                   $MXSML_INIT"
     echo "    mxSmlExGetDeviceHandleByIndex: $MXSML_HANDLE"
+    echo "    mxSmlExDeviceGetName:          $MXSML_NAME"
     echo "    mxSmlExDeviceGetUtilization:   $MXSML_UTIL"
     echo "    mxSmlExDeviceGetMemoryInfo:    $MXSML_MEM"
     echo "    mxSmlExGetPcieThroughput:      $MXSML_PCIE"
@@ -106,10 +108,10 @@ if [ -n "$MXSML_PATH" ]; then
     echo "    mxSmlExDeviceGetFieldValues:   $MXSML_FIELDS"
 
     if [ "$MXSML_INIT" -gt 0 ] && [ "$MXSML_HANDLE" -gt 0 ] && \
-       [ "$MXSML_UTIL" -gt 0 ] && [ "$MXSML_MEM" -gt 0 ]; then
+       [ "$MXSML_NAME" -gt 0 ] && [ "$MXSML_UTIL" -gt 0 ] && [ "$MXSML_MEM" -gt 0 ]; then
         pass "MXSML 扩展资源符号完整"
     else
-        warn "MXSML 扩展符号不完整；utilization / memory 快照可能降级"
+        warn "MXSML 扩展符号不完整；device name / utilization / memory 快照可能降级"
     fi
 
     if [ "$MXSML_PCIE" -gt 0 ] && [ "$MXSML_POWER" -gt 0 ] && \

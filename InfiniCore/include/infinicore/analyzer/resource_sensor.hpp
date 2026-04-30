@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace infinicore::analyzer {
 
@@ -31,6 +32,7 @@ struct MemoryStats {
 struct DeviceResourceSnapshot {
     int device_id = -1;
     Device::Type device_type = Device::Type::CPU;
+    std::string device_name;
 
     bool has_memory_capacity = false;
     bool has_compute_utilization = false;
@@ -92,6 +94,7 @@ public:
     DeviceLocalIntent sense(const DeviceResourceSnapshot &snapshot) const {
         DeviceLocalIntent intent;
         intent.device_id = snapshot.device_id;
+        intent.device_name = snapshot.device_name;
         intent.memory_usage_ratio = snapshot.memoryUsageRatio();
         intent.memory_available_bytes = snapshot.free_bytes > 0
             ? snapshot.free_bytes

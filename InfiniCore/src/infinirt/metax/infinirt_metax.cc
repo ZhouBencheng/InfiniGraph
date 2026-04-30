@@ -1,6 +1,7 @@
 #include "infinirt_metax.h"
 #include "../../utils.h"
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -165,6 +166,7 @@ using MxsmlExShutdownFn = MxsmlReturn (*)();
 using MxsmlExGetDeviceHandleByIndexFn = MxsmlReturn (*)(unsigned int, MxsmlDevice *);
 using MxsmlExDeviceGetUtilizationFn = MxsmlReturn (*)(MxsmlDevice, MxsmlExUtilization *);
 using MxsmlExDeviceGetMemoryInfoFn = MxsmlReturn (*)(MxsmlDevice, MxsmlExMemory *);
+using MxsmlExDeviceGetNameFn = MxsmlReturn (*)(MxsmlDevice, char *, unsigned int);
 
 struct MxsmlApi {
     void *handle = nullptr;
@@ -173,6 +175,7 @@ struct MxsmlApi {
     MxsmlExGetDeviceHandleByIndexFn get_handle_by_index = nullptr;
     MxsmlExDeviceGetUtilizationFn get_utilization = nullptr;
     MxsmlExDeviceGetMemoryInfoFn get_memory_info = nullptr;
+    MxsmlExDeviceGetNameFn get_name = nullptr;
     bool available = false;
     bool initialized = false;
 };
@@ -203,10 +206,10 @@ MxsmlApi &mxsmlApi() {
         loaded.get_handle_by_index = reinterpret_cast<MxsmlExGetDeviceHandleByIndexFn>(dlsym(loaded.handle, "mxSmlExGetDeviceHandleByIndex"));
         loaded.get_utilization = reinterpret_cast<MxsmlExDeviceGetUtilizationFn>(dlsym(loaded.handle, "mxSmlExDeviceGetUtilization"));
         loaded.get_memory_info = reinterpret_cast<MxsmlExDeviceGetMemoryInfoFn>(dlsym(loaded.handle, "mxSmlExDeviceGetMemoryInfo"));
+        loaded.get_name = reinterpret_cast<MxsmlExDeviceGetNameFn>(dlsym(loaded.handle, "mxSmlExDeviceGetName"));
 
         loaded.available = loaded.init != nullptr
-                           && loaded.get_handle_by_index != nullptr
-                           && (loaded.get_utilization != nullptr || loaded.get_memory_info != nullptr);
+                           && loaded.get_handle_by_index != nullptr;
         return loaded;
     }();
     return api;
@@ -232,6 +235,27 @@ bool getMxsmlDevice(int device_id, MxsmlDevice *device) {
         return false;
     }
     return api.get_handle_by_index(static_cast<unsigned int>(device_id), device) == MXSML_SUCCESS;
+}
+
+bool tryPopulateMxsmlDeviceName(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    auto &api = mxsmlApi();
+    if (api.get_name == nullptr) {
+        return false;
+    }
+
+    MxsmlDevice device = nullptr;
+    if (!getMxsmlDevice(device_id, &device)) {
+        return false;
+    }
+
+    char name[INFINIRT_DEVICE_NAME_MAX] = {};
+    if (api.get_name(device, name, static_cast<unsigned int>(sizeof(name))) != MXSML_SUCCESS || name[0] == '\0') {
+        return false;
+    }
+
+    std::snprintf(snapshot->device_name, sizeof(snapshot->device_name), "%s", name);
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_DEVICE_NAME;
+    return true;
 }
 
 bool tryPopulateMxsmlMemory(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
@@ -288,6 +312,10 @@ bool tryPopulateMxsmlMemory(int, infinirtDeviceResourceSnapshot_t *) {
 }
 
 bool tryPopulateMxsmlUtilization(int, infinirtDeviceResourceSnapshot_t *) {
+    return false;
+}
+
+bool tryPopulateMxsmlDeviceName(int, infinirtDeviceResourceSnapshot_t *) {
     return false;
 }
 #endif
@@ -439,6 +467,7 @@ infiniStatus_t getDeviceResourceSnapshot(int device_id, infinirtDeviceResourceSn
         return status;
     }
 
+    (void)tryPopulateMxsmlDeviceName(device_id, snapshot);
     (void)tryPopulateMxsmlUtilization(device_id, snapshot);
     populateCommunicationSnapshot(device_id, snapshot);
 

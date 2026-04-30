@@ -122,6 +122,7 @@ struct GlobalSemanticIntent {
 /// for a specific device in multi-GPU scenario.
 struct DeviceLocalIntent {
     int device_id = -1;
+    std::string device_name;
 
     // Memory utilization (0.0 ~ 1.0)
     float memory_usage_ratio = 0.0f;

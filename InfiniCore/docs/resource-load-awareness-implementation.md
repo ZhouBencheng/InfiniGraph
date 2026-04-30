@@ -27,6 +27,7 @@
 
 - `nvmlInit_v2`
 - `nvmlDeviceGetHandleByIndex_v2`
+- `nvmlDeviceGetName`
 - `nvmlDeviceGetUtilizationRates`
 - `nvmlDeviceGetMemoryInfo`
 - `nvmlDeviceGetPcieThroughput`
@@ -57,6 +58,7 @@
 
 - `mxSmlExInit`
 - `mxSmlExGetDeviceHandleByIndex`
+- `mxSmlExDeviceGetName`
 - `mxSmlExDeviceGetUtilization`
 - `mxSmlExDeviceGetMemoryInfo`
 - `mxSmlExGetPcieThroughput`
@@ -96,6 +98,7 @@
 | --- | --- | --- |
 | infinirt 后端注册 | 复用 CUDA-like 后端，`ENABLE_ILUVATAR_API` | 独立 `infinirt-metax` 后端 |
 | 设备/内存基础 API | CoreX CUDA ABI | MACA `hc*` / `mc*` |
+| 资源快照 - 真实设备型号 | IXML `nvmlDeviceGetName`，用于区分 BI-V150 / BI-200 等 SKU | MXSML `mxSmlExDeviceGetName`，用于区分 C500 / C550 等 SKU |
 | 资源快照 - 内存容量 | `cudaMemGetInfo` | `hcMemGetInfo`，MXSML 可覆盖 |
 | 资源快照 - compute_util | `dlopen libixml.so` + NVML-compatible API | `dlopen libmxsml.so` + `mxSmlExDeviceGetUtilization` |
 | 资源快照 - mem_bw_util | IXML `nvmlDeviceGetUtilizationRates.memory` | MXSML `mxSmlExUtilization.memory` |
@@ -176,6 +179,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
 ## 降级行为
 
 - 找不到 `libixml.so` 或 `libmxsml.so` 时，基础内存快照仍通过 runtime API 返回，但 compute / bandwidth utilization 不置 valid bit。
+- 真实设备型号只来自管理库：天数走 `nvmlDeviceGetName`，沐曦走 `mxSmlExDeviceGetName`。读取失败时 `INFINIRT_RESOURCE_FIELD_DEVICE_NAME` 不置位，demo 只显示平台族和 `model unavailable`，不会把 BI-V150 / BI-200 / C500 写死到输出里。
 - `kernel_time_ratio` 当前由 compute utilization 估计，因此会在 `estimated_fields` 中标记。
 - 通信占比来自最近 1s 内已完成的 AllReduce event sample；没有通信或事件未完成时，通信字节为 0。
 - analyzer 输出会根据 valid bits 计算 `resource_confidence`，不会把缺失的管理库字段当成真实 0 利用率。
@@ -186,7 +190,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
 
 1. `ixsmi -L` 确认卡可见；`ixsmi` 看实时利用率是否有非零字段。
 2. `scripts/test_iluvatar_analyzer.sh` 会检查核心 IXML 符号：
-   - 必需：`nvmlInit_v2`、`nvmlDeviceGetHandleByIndex_v2`、`nvmlDeviceGetUtilizationRates`、`nvmlDeviceGetMemoryInfo`、`nvmlShutdown`。
+   - 必需：`nvmlInit_v2`、`nvmlDeviceGetHandleByIndex_v2`、`nvmlDeviceGetName`、`nvmlDeviceGetUtilizationRates`、`nvmlDeviceGetMemoryInfo`、`nvmlShutdown`。
    - 增强：`nvmlDeviceGetPcieThroughput`、`nvmlDeviceGetPowerUsage`、`nvmlDeviceGetTemperature`。
 3. 如果存在 `libixdcgm.so`，脚本会额外探测 IXDCGM / DCGM-like 符号：
    - 初始化/连接：`dcgmInit`、`dcgmShutdown`、`dcgmStartEmbedded`、`dcgmConnect`。
@@ -198,7 +202,7 @@ python3 scripts/analyzer_load_demo.py --configure metax --extra-config --use-mc=
 
 1. `mx-smi` 确认驱动、设备、利用率和显存字段可见。
 2. `scripts/test_metax_analyzer.sh` 会检查核心 MXSML extension 符号：
-   - 必需：`mxSmlExInit`、`mxSmlExGetDeviceHandleByIndex`、`mxSmlExDeviceGetUtilization`、`mxSmlExDeviceGetMemoryInfo`。
+   - 必需：`mxSmlExInit`、`mxSmlExGetDeviceHandleByIndex`、`mxSmlExDeviceGetName`、`mxSmlExDeviceGetUtilization`、`mxSmlExDeviceGetMemoryInfo`。
    - 增强：`mxSmlExGetPcieThroughput`、`mxSmlExGetPowerUsage`、`mxSmlExDeviceGetTemperature`、`mxSmlExDeviceGetComputeRunningProcesses`、`mxSmlExDeviceGetFieldValues`。
 3. 同一个 `libmxsml.so` 还会检查 base MXSML 高阶字段：
    - `MxSmlGetMemoryInfo`、`MxSmlGetHbmBandWidth`、`MxSmlGetDmaBandwidth`、`MxSmlGetPcieThroughput`。

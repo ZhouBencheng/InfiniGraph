@@ -38,7 +38,7 @@ using namespace infinicore::analyzer;
 struct DetectedDevice {
     infiniDevice_t type = INFINI_DEVICE_CPU;
     int count = 0;
-    const char *name = "CPU";
+    std::string name = "CPU";
 };
 
 static const char *deviceTypeName(infiniDevice_t t) {
@@ -57,6 +57,22 @@ static const char *deviceTypeName(infiniDevice_t t) {
     }
 }
 
+static std::string deviceDisplayName(infiniDevice_t t, int device_id) {
+    if (t == INFINI_DEVICE_CPU) {
+        return deviceTypeName(t);
+    }
+
+    infinirtDeviceResourceSnapshot_t snapshot{};
+    auto status = infinirtGetDeviceResourceSnapshot(t, device_id, &snapshot);
+    if (status == INFINI_STATUS_SUCCESS
+        && (snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_DEVICE_NAME)
+        && snapshot.device_name[0] != '\0') {
+        return snapshot.device_name;
+    }
+
+    return std::string(deviceTypeName(t)) + " (model unavailable)";
+}
+
 static DetectedDevice detectAccelerator() {
     // Try accelerators in priority order; pick the first that reports >0 devices.
     infiniDevice_t order[] = {
@@ -71,7 +87,7 @@ static DetectedDevice detectAccelerator() {
     for (auto t : order) {
         int c = 0;
         if (infinirtGetDeviceCount(t, &c) == INFINI_STATUS_SUCCESS && c > 0) {
-            return {t, c, deviceTypeName(t)};
+            return {t, c, deviceDisplayName(t, 0)};
         }
     }
     return {INFINI_DEVICE_CPU, 1, "CPU"};
@@ -151,7 +167,7 @@ static void printBanner(const DetectedDevice &dev) {
     printRule('=');
     std::printf(" 启用状态        : enabled\n");
     std::printf(" OpTrace 容量    : %u\n", (unsigned)getGlobalOpTrace().capacity());
-    std::printf(" 检测到设备      : %d x %s\n", dev.count, dev.name);
+    std::printf(" 检测到设备      : %d x %s\n", dev.count, dev.name.c_str());
     std::printf(" 后端 runtime    : infinirt (live, 真数据采集)\n");
     printRule('=');
     std::putchar('\n');
@@ -195,7 +211,11 @@ static void printDeviceSnapshot(const OptimizationIntent &intent) {
     for (const auto &d : intent.per_device) {
         double mem_total_gb = d.memory_available_bytes > 0
             ? (double)(d.memory_available_bytes) / (1024.0 * 1024.0 * 1024.0) : 0.0;
-        std::printf("  [Device %d]\n", d.device_id);
+        if (!d.device_name.empty()) {
+            std::printf("  [Device %d: %s]\n", d.device_id, d.device_name.c_str());
+        } else {
+            std::printf("  [Device %d]\n", d.device_id);
+        }
         std::printf("    显存可用      : %.2f GB\n", mem_total_gb);
         std::printf("    显存使用率    : %5.1f%%\n", d.memory_usage_ratio * 100.0);
         std::printf("    算力利用率    : %5.1f%%\n", d.compute_utilization * 100.0);

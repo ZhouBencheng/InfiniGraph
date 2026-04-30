@@ -43,6 +43,10 @@ DeviceResourceSnapshot buildSnapshotFromInfinirt(
         snapshot.has_kernel_time_ratio = (rt_snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO) != 0;
         snapshot.has_communication = (rt_snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_COMMUNICATION) != 0;
         snapshot.kernel_time_estimated = (rt_snapshot.estimated_fields & INFINIRT_RESOURCE_FIELD_KERNEL_TIME_RATIO) != 0;
+        if ((rt_snapshot.valid_fields & INFINIRT_RESOURCE_FIELD_DEVICE_NAME) != 0
+            && rt_snapshot.device_name[0] != '\0') {
+            snapshot.device_name = rt_snapshot.device_name;
+        }
 
         snapshot.free_bytes = rt_snapshot.free_bytes;
         snapshot.total_bytes = rt_snapshot.total_bytes;
