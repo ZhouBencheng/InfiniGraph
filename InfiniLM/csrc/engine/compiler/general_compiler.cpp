@@ -1,7 +1,7 @@
 #include "general_compiler.hpp"
 
 namespace infinilm::engine {
-GeneralCompiler::GeneralCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier) : GraphCompiler(model, barrier) {
+GeneralCompiler::GeneralCompiler(const std::shared_ptr<InfinilmModel> &model, RankBarrier *barrier, bool enable_chunk_prefill_graph) : GraphCompiler(model, barrier), enable_chunk_prefill_graph_(enable_chunk_prefill_graph) {
     static_batching_compiler_ = std::make_unique<StaticBatchingCompiler>(model_, barrier);
     chunk_prefill_compiler_ = std::make_unique<ChunkPrefillCompiler>(model_, barrier);
     paged_compiler_ = std::make_unique<PagedCompiler>(model_, barrier);
@@ -9,7 +9,9 @@ GeneralCompiler::GeneralCompiler(const std::shared_ptr<InfinilmModel> &model, Ra
 
 void GeneralCompiler::compile() {
     static_batching_compiler_->compile();
-    chunk_prefill_compiler_->compile();
+     if (enable_chunk_prefill_graph_) {
+          chunk_prefill_compiler_->compile();
+      }
     paged_compiler_->compile();
 }
 
